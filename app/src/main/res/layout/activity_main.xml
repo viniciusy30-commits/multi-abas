@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@color/bg">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="52dp"
+        android:gravity="center_vertical" android:paddingStart="8dp" android:orientation="horizontal">
+        <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvTabs"
+            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" />
+        <ImageButton android:id="@+id/btnAdd" android:layout_width="44dp" android:layout_height="44dp"
+            android:src="@drawable/ic_add" android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Nova aba" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:gravity="center_vertical" android:paddingHorizontal="8dp" android:paddingBottom="6dp"
+        android:orientation="horizontal">
+        <EditText android:id="@+id/urlBar" android:layout_width="0dp" android:layout_height="42dp"
+            android:layout_weight="1" android:background="@drawable/bg_url" android:paddingHorizontal="16dp"
+            android:singleLine="true" android:inputType="textUri" android:imeOptions="actionGo"
+            android:textColor="#FFFFFF" android:textSize="14sp" android:selectAllOnFocus="true" />
+        <ImageButton android:id="@+id/btnMenu" android:layout_width="44dp" android:layout_height="44dp"
+            android:src="@drawable/ic_more" android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Menu" />
+    </LinearLayout>
+    <ProgressBar android:id="@+id/progress" style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent" android:layout_height="3dp" android:visibility="gone"
+        android:progressTint="@color/accent" />
+    <FrameLayout android:id="@+id/container" android:layout_width="match_parent"
+        android:layout_height="0dp" android:layout_weight="1" />
+</LinearLayout>

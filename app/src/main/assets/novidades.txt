@@ -1,0 +1,5 @@
+#id 2026-10-11-a
+#titulo Primeira versão
+- Várias abas, cada uma com login e cookies separados
+- Escolha de arquivos do celular dentro dos sites
+- Atualização pelo próprio app
