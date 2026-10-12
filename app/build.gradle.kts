@@ -34,4 +34,5 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.webkit:webkit:1.11.0")
+    implementation("androidx.browser:browser:1.8.0")
 }

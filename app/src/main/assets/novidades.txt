@@ -1,3 +1,8 @@
+#id 2026-10-12-c
+#titulo GitHub com o login certo
+- Cada favorito escolhe como abrir: conta da aba, sessão compartilhada ou Chrome
+- Pelo Chrome usa o mesmo login do seu Chrome (marcado com ↗)
+
 #id 2026-10-12-b
 #titulo Limite das contas
 - Segure uma aba e escolha "Definir volta do limite"

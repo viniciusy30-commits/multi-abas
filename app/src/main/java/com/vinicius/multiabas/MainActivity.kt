@@ -40,7 +40,7 @@ class MainActivity : AppCompatActivity() {
     private var fileCb: ValueCallback<Array<Uri>>? = null
     private val profilesOk by lazy { WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) }
     private val prefs by lazy { getSharedPreferences("tabs", 0) }
-    private class Fav(var name: String, var url: String)
+    private class Fav(var name: String, var url: String, var mode: Int = 0)
     private val favs = mutableListOf<Fav>()
     private val favAdapter = FavAdapter()
     private var favWeb: WebView? = null
@@ -265,7 +265,7 @@ class MainActivity : AppCompatActivity() {
             val a = JSONArray(prefs.getString("favs", "[]"))
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                favs.add(Fav(o.getString("name"), o.getString("url")))
+                favs.add(Fav(o.getString("name"), o.getString("url"), o.optInt("mode", 0)))
             }
         } catch (e: Exception) { }
         favAdapter.notifyDataSetChanged()
@@ -273,7 +273,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveFavs() {
         val a = JSONArray()
-        favs.forEach { a.put(JSONObject().put("name", it.name).put("url", it.url)) }
+        favs.forEach { a.put(JSONObject().put("name", it.name).put("url", it.url).put("mode", it.mode)) }
         prefs.edit().putString("favs", a.toString()).apply()
     }
 
@@ -285,7 +285,11 @@ class MainActivity : AppCompatActivity() {
         val u = EditText(this); u.hint = "Link"; u.setSingleLine()
         u.inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI
         if (i >= 0) { n.setText(favs[i].name); u.setText(favs[i].url) } else u.setText(tabs[cur].url)
-        box.addView(n); box.addView(u)
+        val sp = Spinner(this)
+        sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
+            arrayOf("Abrir na conta da aba", "Sessão compartilhada do app", "Abrir pelo Chrome"))
+        sp.setSelection(if (i >= 0) favs[i].mode else 0)
+        box.addView(n); box.addView(u); box.addView(sp)
         AlertDialog.Builder(this).setTitle(if (i >= 0) "Editar favorito" else "Novo favorito").setView(box)
             .setPositiveButton("Salvar") { _, _ ->
                 var url = u.text.toString().trim()
@@ -293,7 +297,7 @@ class MainActivity : AppCompatActivity() {
                 if (!url.startsWith("http")) url = "https://$url"
                 val name = n.text.toString().trim()
                 val nm = if (name.isEmpty()) (Uri.parse(url).host ?: url) else name
-                if (i >= 0) { favs[i].name = nm; favs[i].url = url } else favs.add(Fav(nm, url))
+                if (i >= 0) { favs[i].name = nm; favs[i].url = url; favs[i].mode = sp.selectedItemPosition } else favs.add(Fav(nm, url, sp.selectedItemPosition))
                 saveFavs(); favAdapter.notifyDataSetChanged()
             }.setNegativeButton("Cancelar", null).show()
     }
@@ -309,8 +313,13 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun openFav(f: Fav) {
         closeFav()
+        if (f.mode == 2) {
+            try { androidx.browser.customtabs.CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(f.url)) }
+            catch (e: Exception) { Toast.makeText(this, "Não foi possível abrir pelo Chrome", Toast.LENGTH_SHORT).show() }
+            return
+        }
         val w = WebView(this)
-        if (profilesOk) { try { WebViewCompat.setProfile(w, "p_" + tabs[cur].id) } catch (e: Exception) { } }
+        if (profilesOk) { try { WebViewCompat.setProfile(w, "p_" + (if (f.mode == 1) "shared" else tabs[cur].id)) } catch (e: Exception) { } }
         w.layoutParams = ViewGroup.LayoutParams(-1, -1)
         w.setBackgroundColor(Color.parseColor("#0F1115"))
         val s = w.settings
@@ -361,7 +370,7 @@ class MainActivity : AppCompatActivity() {
         override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_tab, p, false) as TextView)
         override fun getItemCount() = favs.size
         override fun onBindViewHolder(h: VH, i: Int) {
-            h.t.text = favs[i].name
+            h.t.text = favs[i].name + (if (favs[i].mode == 2) " ↗" else "")
             h.t.setTextColor(Color.parseColor("#E6E9F0"))
             h.t.setOnClickListener { val p = h.bindingAdapterPosition; if (p >= 0) openFav(favs[p]) }
             h.t.setOnLongClickListener { favOptions(h.bindingAdapterPosition); true }
