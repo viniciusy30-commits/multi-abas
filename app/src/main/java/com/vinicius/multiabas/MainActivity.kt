@@ -40,6 +40,14 @@ class MainActivity : AppCompatActivity() {
     private var fileCb: ValueCallback<Array<Uri>>? = null
     private val profilesOk by lazy { WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) }
     private val prefs by lazy { getSharedPreferences("tabs", 0) }
+    private class Fav(var name: String, var url: String)
+    private val favs = mutableListOf<Fav>()
+    private val favAdapter = FavAdapter()
+    private var favWeb: WebView? = null
+    private lateinit var overlay: View
+    private lateinit var favHost: FrameLayout
+    private lateinit var favTitle: TextView
+    private lateinit var favProgress: ProgressBar
 
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         fileCb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(r.resultCode, r.data))
@@ -55,6 +63,16 @@ class MainActivity : AppCompatActivity() {
         rv = findViewById(R.id.rvTabs)
         rv.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
         rv.adapter = adapter
+        overlay = findViewById(R.id.overlay)
+        favHost = findViewById(R.id.favHost)
+        favTitle = findViewById(R.id.favTitle)
+        favProgress = findViewById(R.id.favProgress)
+        findViewById<ImageButton>(R.id.btnFavClose).setOnClickListener { closeFav() }
+        val rf = findViewById<RecyclerView>(R.id.rvFavs)
+        rf.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        rf.adapter = favAdapter
+        findViewById<ImageButton>(R.id.btnFavAdd).setOnClickListener { editFav(-1) }
+        loadFavs()
         findViewById<ImageButton>(R.id.btnAdd).setOnClickListener { addTab() }
         findViewById<ImageButton>(R.id.btnMenu).setOnClickListener { showMenu(it) }
         urlBar.setOnEditorActionListener { v, id, _ ->
@@ -62,6 +80,8 @@ class MainActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                val fw = favWeb
+                if (fw != null) { if (fw.canGoBack()) fw.goBack() else closeFav(); return }
                 val w = webs[tabs[cur].id]
                 if (w != null && w.canGoBack()) w.goBack() else finish()
             }
@@ -161,6 +181,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun select(i: Int) {
         if (i < 0 || i >= tabs.size) return
+        closeFav()
         cur = i
         val t = tabs[i]
         val w = webFor(t)
@@ -235,6 +256,114 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Verificar atualização") { _, _ -> Updater.check(this, true) }
             .setNeutralButton("O que mudou") { _, _ -> Novidades.show(this, true) }
             .setNegativeButton("Fechar", null).show()
+    }
+
+    private fun loadFavs() {
+        try {
+            val a = JSONArray(prefs.getString("favs", "[]"))
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                favs.add(Fav(o.getString("name"), o.getString("url")))
+            }
+        } catch (e: Exception) { }
+        favAdapter.notifyDataSetChanged()
+    }
+
+    private fun saveFavs() {
+        val a = JSONArray()
+        favs.forEach { a.put(JSONObject().put("name", it.name).put("url", it.url)) }
+        prefs.edit().putString("favs", a.toString()).apply()
+    }
+
+    private fun editFav(i: Int) {
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(56, 16, 56, 0)
+        val n = EditText(this); n.hint = "Nome"; n.setSingleLine()
+        val u = EditText(this); u.hint = "Link"; u.setSingleLine()
+        u.inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI
+        if (i >= 0) { n.setText(favs[i].name); u.setText(favs[i].url) } else u.setText(tabs[cur].url)
+        box.addView(n); box.addView(u)
+        AlertDialog.Builder(this).setTitle(if (i >= 0) "Editar favorito" else "Novo favorito").setView(box)
+            .setPositiveButton("Salvar") { _, _ ->
+                var url = u.text.toString().trim()
+                if (url.isEmpty()) return@setPositiveButton
+                if (!url.startsWith("http")) url = "https://$url"
+                val name = n.text.toString().trim()
+                val nm = if (name.isEmpty()) (Uri.parse(url).host ?: url) else name
+                if (i >= 0) { favs[i].name = nm; favs[i].url = url } else favs.add(Fav(nm, url))
+                saveFavs(); favAdapter.notifyDataSetChanged()
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun favOptions(i: Int) {
+        if (i < 0 || i >= favs.size) return
+        AlertDialog.Builder(this).setTitle(favs[i].name)
+            .setItems(arrayOf("Editar", "Remover")) { _, w ->
+                if (w == 0) editFav(i) else { favs.removeAt(i); saveFavs(); favAdapter.notifyDataSetChanged() }
+            }.show()
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun openFav(f: Fav) {
+        closeFav()
+        val w = WebView(this)
+        if (profilesOk) { try { WebViewCompat.setProfile(w, "p_" + tabs[cur].id) } catch (e: Exception) { } }
+        w.layoutParams = ViewGroup.LayoutParams(-1, -1)
+        w.setBackgroundColor(Color.parseColor("#0F1115"))
+        val s = w.settings
+        s.javaScriptEnabled = true
+        s.domStorageEnabled = true
+        s.allowFileAccess = false
+        s.userAgentString = s.userAgentString.replace("; wv", "").replace(Regex("Version/\\d+\\.\\d+ "), "")
+        CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
+        w.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
+                val sc = r.url.scheme ?: ""
+                if (sc == "http" || sc == "https") return false
+                try { startActivity(Intent(Intent.ACTION_VIEW, r.url)) } catch (e: Exception) { }
+                return true
+            }
+        }
+        w.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(v: WebView, p: Int) {
+                favProgress.progress = p
+                favProgress.visibility = if (p < 100) View.VISIBLE else View.GONE
+            }
+            override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
+                fileCb?.onReceiveValue(null)
+                fileCb = cb
+                return try { picker.launch(p.createIntent()); true } catch (e: Exception) { fileCb = null; false }
+            }
+        }
+        favHost.addView(w)
+        favWeb = w
+        favTitle.text = f.name
+        overlay.alpha = 0f
+        overlay.visibility = View.VISIBLE
+        overlay.animate().alpha(1f).setDuration(180).start()
+        w.loadUrl(f.url)
+    }
+
+    private fun closeFav() {
+        val w = favWeb ?: return
+        favWeb = null
+        overlay.visibility = View.GONE
+        favProgress.visibility = View.GONE
+        favHost.removeView(w)
+        w.destroy()
+    }
+
+    inner class FavAdapter : RecyclerView.Adapter<FavAdapter.VH>() {
+        inner class VH(val t: TextView) : RecyclerView.ViewHolder(t)
+        override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_tab, p, false) as TextView)
+        override fun getItemCount() = favs.size
+        override fun onBindViewHolder(h: VH, i: Int) {
+            h.t.text = favs[i].name
+            h.t.setTextColor(Color.parseColor("#E6E9F0"))
+            h.t.setOnClickListener { val p = h.bindingAdapterPosition; if (p >= 0) openFav(favs[p]) }
+            h.t.setOnLongClickListener { favOptions(h.bindingAdapterPosition); true }
+        }
     }
 
     inner class TabAdapter : RecyclerView.Adapter<TabAdapter.VH>() {
