@@ -1,3 +1,9 @@
+#id 2026-10-12-b
+#titulo Limite das contas
+- Segure uma aba e escolha "Definir volta do limite"
+- Um cronômetro mostra quanto falta, embaixo do nome da aba
+- Quando passar da hora aparece "Liberado" em verde
+
 #id 2026-10-12-a
 #titulo Barra de favoritos
 - Barra embaixo com links favoritos que você nomeia

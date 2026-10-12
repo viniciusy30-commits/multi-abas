@@ -25,7 +25,7 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
 
-class Tab(val id: String, var name: String, var url: String)
+class Tab(val id: String, var name: String, var url: String, var until: Long = 0L)
 
 class MainActivity : AppCompatActivity() {
     private val HOME = "https://claude.ai"
@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
             val a = JSONArray(prefs.getString("tabs", "[]"))
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                tabs.add(Tab(o.getString("id"), o.getString("name"), o.getString("url")))
+                tabs.add(Tab(o.getString("id"), o.getString("name"), o.getString("url"), o.optLong("until", 0L)))
             }
         } catch (e: Exception) { }
         if (tabs.isEmpty()) tabs.add(newTab("Conta 1"))
@@ -109,7 +109,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun save() {
         val a = JSONArray()
-        tabs.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url)) }
+        tabs.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url).put("until", it.until)) }
         prefs.edit().putString("tabs", a.toString()).putInt("cur", cur).apply()
     }
 
@@ -220,11 +220,13 @@ class MainActivity : AppCompatActivity() {
     private fun tabOptions(i: Int) {
         if (i < 0 || i >= tabs.size) return
         AlertDialog.Builder(this).setTitle(tabs[i].name)
-            .setItems(arrayOf("Renomear", "Recarregar", "Fechar aba")) { _, w ->
+            .setItems(arrayOf("Renomear", "Recarregar", "Definir volta do limite", "Limpar limite", "Fechar aba")) { _, w ->
                 when (w) {
                     0 -> input("Renomear aba", tabs[i].name) { tabs[i].name = it; adapter.notifyDataSetChanged(); save() }
                     1 -> webs[tabs[i].id]?.reload()
-                    2 -> AlertDialog.Builder(this).setTitle("Fechar \"${tabs[i].name}\"?")
+                    2 -> pickLimit(i)
+                    3 -> { tabs[i].until = 0L; save(); tickNow() }
+                    4 -> AlertDialog.Builder(this).setTitle("Fechar \"${tabs[i].name}\"?")
                         .setMessage("O login dessa aba será apagado.")
                         .setPositiveButton("Fechar") { _, _ -> closeTab(i) }
                         .setNegativeButton("Cancelar", null).show()
@@ -366,16 +368,63 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val ticker = object : Runnable {
+        override fun run() { tickNow(); handler.postDelayed(this, 1000) }
+    }
+
+    override fun onResume() { super.onResume(); handler.post(ticker) }
+    override fun onPause() { super.onPause(); handler.removeCallbacks(ticker) }
+
+    private fun tickNow() {
+        for (k in 0 until rv.childCount) {
+            val v = rv.getChildAt(k)
+            val p = rv.getChildAdapterPosition(v)
+            val h = rv.getChildViewHolder(v) as? TabAdapter.VH ?: continue
+            if (p >= 0 && p < tabs.size) h.bindStatus(tabs[p])
+        }
+    }
+
+    private fun fmt(ms: Long): String {
+        val s = ms / 1000
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+    }
+
+    private fun pickLimit(i: Int) {
+        val c = java.util.Calendar.getInstance()
+        android.app.TimePickerDialog(this, { _, h, m ->
+            val t = java.util.Calendar.getInstance()
+            t.set(java.util.Calendar.HOUR_OF_DAY, h)
+            t.set(java.util.Calendar.MINUTE, m)
+            t.set(java.util.Calendar.SECOND, 0)
+            t.set(java.util.Calendar.MILLISECOND, 0)
+            if (t.timeInMillis <= System.currentTimeMillis()) t.add(java.util.Calendar.DAY_OF_YEAR, 1)
+            tabs[i].until = t.timeInMillis
+            save(); tickNow()
+        }, c.get(java.util.Calendar.HOUR_OF_DAY), c.get(java.util.Calendar.MINUTE), true).show()
+    }
+
     inner class TabAdapter : RecyclerView.Adapter<TabAdapter.VH>() {
-        inner class VH(val t: TextView) : RecyclerView.ViewHolder(t)
-        override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_tab, p, false) as TextView)
+        inner class VH(val v: View) : RecyclerView.ViewHolder(v) {
+            val name: TextView = v.findViewById(R.id.tabName)
+            val st: TextView = v.findViewById(R.id.tabStatus)
+            fun bindStatus(t: Tab) {
+                if (t.until <= 0L) { st.visibility = View.GONE; return }
+                st.visibility = View.VISIBLE
+                val left = t.until - System.currentTimeMillis()
+                if (left <= 0L) { st.text = "Liberado"; st.setTextColor(Color.parseColor("#4ADE80")) }
+                else { st.text = fmt(left); st.setTextColor(Color.parseColor("#E0A58F")) }
+            }
+        }
+        override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_conta, p, false))
         override fun getItemCount() = tabs.size
         override fun onBindViewHolder(h: VH, i: Int) {
-            h.t.text = tabs[i].name
-            h.t.isSelected = i == cur
-            h.t.setTextColor(if (i == cur) Color.WHITE else Color.parseColor("#B0B6C3"))
-            h.t.setOnClickListener { select(h.bindingAdapterPosition) }
-            h.t.setOnLongClickListener { tabOptions(h.bindingAdapterPosition); true }
+            h.name.text = tabs[i].name
+            h.v.isSelected = i == cur
+            h.name.setTextColor(if (i == cur) Color.WHITE else Color.parseColor("#B0B6C3"))
+            h.bindStatus(tabs[i])
+            h.v.setOnClickListener { select(h.bindingAdapterPosition) }
+            h.v.setOnLongClickListener { tabOptions(h.bindingAdapterPosition); true }
         }
     }
 }
