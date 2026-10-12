@@ -132,7 +132,7 @@ class MainActivity : AppCompatActivity() {
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val sc = r.url.scheme ?: ""
-                if (sc == "http" || sc == "https") return false
+                if (sc == "http" || sc == "https") return githubToChrome(v, r)
                 try { startActivity(Intent(Intent.ACTION_VIEW, r.url)) } catch (e: Exception) { }
                 return true
             }
@@ -230,6 +230,20 @@ class MainActivity : AppCompatActivity() {
     private val HOOK_JS = """(function(){if(window.__dlHook)return;window.__dlHook=1;var oc=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){try{if(this.download)window.__lastDl=this.download;}catch(e){}return oc.apply(this,arguments);};var od=EventTarget.prototype.dispatchEvent;EventTarget.prototype.dispatchEvent=function(ev){try{if(this instanceof HTMLAnchorElement&&ev&&ev.type==='click'&&this.download)window.__lastDl=this.download;}catch(e){}return od.apply(this,arguments);};document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[download]'):null;if(a&&a.download)window.__lastDl=a.download;},true);})();"""
 
     private fun hook(v: WebView) { v.evaluateJavascript(HOOK_JS, null) }
+
+    private fun githubToChrome(v: WebView, r: WebResourceRequest): Boolean {
+        if (!r.isForMainFrame) return false
+        val host = r.url.host ?: return false
+        if (host != "github.com" && !host.endsWith(".github.com")) return false
+        val cur = Uri.parse(v.url ?: "").host ?: ""
+        if (cur == "github.com" || cur.endsWith(".github.com")) return false
+        val p = r.url.path ?: ""
+        if (p.startsWith("/login") || p.startsWith("/session") || p.startsWith("/apps/") || p.startsWith("/settings/connections")) return false
+        return try {
+            androidx.browser.customtabs.CustomTabsIntent.Builder().build().launchUrl(this, r.url)
+            true
+        } catch (e: Exception) { false }
+    }
 
     private fun upd(v: WebView, u: String?) {
         val tb = tabs.firstOrNull { it.id == v.tag } ?: return
@@ -391,7 +405,7 @@ class MainActivity : AppCompatActivity() {
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val sc = r.url.scheme ?: ""
-                if (sc == "http" || sc == "https") return false
+                if (sc == "http" || sc == "https") return githubToChrome(v, r)
                 try { startActivity(Intent(Intent.ACTION_VIEW, r.url)) } catch (e: Exception) { }
                 return true
             }

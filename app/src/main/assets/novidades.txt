@@ -1,3 +1,7 @@
+#id 2026-10-12-f
+#titulo Links do GitHub pelo Chrome
+- Tocar num link do GitHub dentro do Claude abre pelo Chrome, com o seu login
+
 #id 2026-10-12-e
 #titulo Nome do arquivo nos downloads
 - Arquivos baixados agora mantêm o nome original
