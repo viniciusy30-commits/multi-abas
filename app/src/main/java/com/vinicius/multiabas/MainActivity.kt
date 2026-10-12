@@ -141,6 +141,7 @@ class MainActivity : AppCompatActivity() {
         }
         w.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(v: WebView, p: Int) {
+                hook(v)
                 if (v.tag == tabs[cur].id) {
                     progress.progress = p
                     progress.visibility = if (p < 100) View.VISIBLE else View.GONE
@@ -152,7 +153,65 @@ class MainActivity : AppCompatActivity() {
                 return try { picker.launch(p.createIntent()); true } catch (e: Exception) { fileCb = null; false }
             }
         }
+        setupDownload(w)
+        container.addView(w)
+        w.loadUrl(t.url)
+        w
+    }
+
+    private val dlTokens: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    inner class Bridge {
+        @JavascriptInterface
+        fun save(token: String, dataUrl: String, mime: String, name: String) {
+            if (!dlTokens.remove(token)) return
+            try {
+                val bytes = android.util.Base64.decode(dataUrl.substringAfter(","), android.util.Base64.DEFAULT)
+                val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "bin"
+                val clean = name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim()
+                val fin = if (clean.isEmpty()) "claude_" + System.currentTimeMillis() + "." + ext
+                    else if (!clean.contains('.')) clean + "." + ext else clean
+                saveBytes(bytes, fin, mime)
+                runOnUiThread { Toast.makeText(this@MainActivity, "Salvo em Downloads: $fin", Toast.LENGTH_LONG).show() }
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this@MainActivity, "Falha ao salvar o arquivo", Toast.LENGTH_LONG).show() }
+            }
+        }
+        @JavascriptInterface
+        fun fail(token: String) {
+            dlTokens.remove(token)
+            runOnUiThread { Toast.makeText(this@MainActivity, "Não foi possível baixar", Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    private fun saveBytes(b: ByteArray, name: String, mime: String) {
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val v = android.content.ContentValues()
+            v.put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+            v.put(android.provider.MediaStore.Downloads.MIME_TYPE, mime)
+            v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)!!
+            contentResolver.openOutputStream(uri)!!.use { it.write(b) }
+        } else {
+            java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)!!, name).writeBytes(b)
+        }
+    }
+
+    private fun setupDownload(w: WebView) {
+        w.addJavascriptInterface(Bridge(), "AndroidDl")
         w.setDownloadListener { u, ua, cd, mime, _ ->
+            if (u.startsWith("blob:")) {
+                if (u.contains("'")) return@setDownloadListener
+                val mt = if (mime.isNullOrBlank() || mime.contains("'")) "application/octet-stream" else mime
+                val tk = java.util.UUID.randomUUID().toString()
+                dlTokens.add(tk)
+                val js = "(function(){var fn=window.__lastDl||'';window.__lastDl='';var x=new XMLHttpRequest();x.open('GET','" + u + "',true);x.responseType='blob';" +
+                    "x.onload=function(){var r=new FileReader();r.onloadend=function(){AndroidDl.save('" + tk + "',r.result,'" + mt + "',fn);};r.readAsDataURL(x.response);};" +
+                    "x.onerror=function(){AndroidDl.fail('" + tk + "');};x.send();})()"
+                w.evaluateJavascript(js, null)
+                Toast.makeText(this, "Baixando…", Toast.LENGTH_SHORT).show()
+                return@setDownloadListener
+            }
             try {
                 val name = URLUtil.guessFileName(u, cd, mime)
                 val r = DownloadManager.Request(Uri.parse(u))
@@ -166,10 +225,11 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Baixando $name", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) { Toast.makeText(this, "Não foi possível baixar", Toast.LENGTH_SHORT).show() }
         }
-        container.addView(w)
-        w.loadUrl(t.url)
-        w
     }
+
+    private val HOOK_JS = """(function(){if(window.__dlHook)return;window.__dlHook=1;var oc=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){try{if(this.download)window.__lastDl=this.download;}catch(e){}return oc.apply(this,arguments);};var od=EventTarget.prototype.dispatchEvent;EventTarget.prototype.dispatchEvent=function(ev){try{if(this instanceof HTMLAnchorElement&&ev&&ev.type==='click'&&this.download)window.__lastDl=this.download;}catch(e){}return od.apply(this,arguments);};document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[download]'):null;if(a&&a.download)window.__lastDl=a.download;},true);})();"""
+
+    private fun hook(v: WebView) { v.evaluateJavascript(HOOK_JS, null) }
 
     private fun upd(v: WebView, u: String?) {
         val tb = tabs.firstOrNull { it.id == v.tag } ?: return
@@ -338,6 +398,7 @@ class MainActivity : AppCompatActivity() {
         }
         w.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(v: WebView, p: Int) {
+                hook(v)
                 favProgress.progress = p
                 favProgress.visibility = if (p < 100) View.VISIBLE else View.GONE
             }
@@ -347,6 +408,7 @@ class MainActivity : AppCompatActivity() {
                 return try { picker.launch(p.createIntent()); true } catch (e: Exception) { fileCb = null; false }
             }
         }
+        setupDownload(w)
         favHost.addView(w)
         favWeb = w
         favTitle.text = f.name
