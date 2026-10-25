@@ -1,3 +1,8 @@
+#id 2026-10-25-e
+#titulo Colar texto grande
+- Menu → Colar texto grande: cole qualquer texto, o app vira um arquivo .txt e anexa no chat da aba
+- Dá para usar o texto direto da área de transferência, sem colar na caixa
+
 #id 2026-10-25-d
 #titulo Atualização automática do jogo
 - Quando o build termina, o app já baixa o APK e abre a instalação sozinho

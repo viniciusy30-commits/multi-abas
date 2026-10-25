@@ -555,6 +555,8 @@ class MainActivity : AppCompatActivity() {
         ))
         sh.section("Limite acabou?")
         sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Salva o chat completo, imagens e código num ZIP e leva para outra aba") { manualHandoff() }
+        sh.section("Texto grande")
+        sh.row(R.drawable.ic_send, "Colar texto grande", "Vira um arquivo .txt e anexa no chat desta aba") { pasteLargeText() }
         sh.show()
     }
 
@@ -889,6 +891,91 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ───────────── Colar texto grande → arquivo → anexo no Claude ─────────────
+
+    private fun pasteLargeText() {
+        val t = tabs.getOrNull(cur) ?: return
+        val w = webs[t.id]
+        if (w == null || !(w.url ?: "").contains("claude.ai")) {
+            say("Abra o Claude nesta aba primeiro", true)
+            return
+        }
+        val input = android.widget.EditText(this).apply {
+            hint = "Cole o texto aqui"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 8
+            maxLines = 14
+            gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            isVerticalScrollBarEnabled = true
+        }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val box = android.widget.FrameLayout(this).apply {
+            setPadding(pad, 8, pad, 0)
+            addView(input)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Colar texto grande")
+            .setMessage("Vira um arquivo .txt e é anexado no chat desta aba.")
+            .setView(box)
+            .setPositiveButton("Anexar") { _, _ -> sendTextAsFile(t, input.text?.toString().orEmpty()) }
+            .setNeutralButton("Usar área de transferência") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = try { cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString() } catch (_: Exception) { null }
+                sendTextAsFile(t, clip.orEmpty())
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun sendTextAsFile(t: Tab, text: String) {
+        if (text.isBlank()) { say("Nada para anexar", true); return }
+        val w = webs[t.id] ?: return
+        val popup = BuildPopup(this, t.name, "Anexar texto")
+        val ui = HandoffUi(popup)
+        popup.show()
+        popup.progress(10)
+        popup.status("Criando o arquivo…")
+        val kb = text.toByteArray(Charsets.UTF_8).size / 1024
+        ui.set("txt", "✓", "Texto recebido (${text.length} caracteres, $kb KB)")
+        ui.set("file", "⏳", "Criando o arquivo")
+        Thread {
+            val dir = java.io.File(cacheDir, "handoff_out").apply { mkdirs() }
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+            val f = java.io.File(dir, "texto-colado-$stamp.txt")
+            val ok = try { f.writeText(text); true } catch (_: Exception) { false }
+            runOnUiThread {
+                if (!ok) {
+                    ui.set("file", "✗", "Não consegui criar o arquivo")
+                    popup.status("Falhou ✗")
+                    popup.done(false, null, null)
+                    return@runOnUiThread
+                }
+                ui.set("file", "✓", "Arquivo ${f.name} criado")
+                popup.progress(50)
+                popup.status("Anexando no Claude…")
+                ui.set("attach", "⏳", "Anexando ao chat")
+                try {
+                    val uri = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f)
+                    attachZip(t, f, uri) { done ->
+                        if (done) {
+                            ui.set("attach", "✓", "Anexado ao chat")
+                            popup.progress(100)
+                            popup.status("Pronto ✓ Escreva sua mensagem e envie")
+                            popup.done(true, null, null)
+                        } else {
+                            ui.set("attach", "✗", "Não anexou sozinho: toque em + e anexe ${f.name}")
+                            popup.status("Quase: falta só anexar")
+                            popup.done(false, null, null)
+                        }
+                    }
+                } catch (e: Exception) {
+                    ui.set("attach", "✗", "Erro: ${e.message}")
+                    popup.done(false, null, null)
+                }
+            }
+        }.start()
+    }
+
     /** Lista de etapas (✓ ⏳ ✗) mostrada no popup da continuação. */
     private class HandoffUi(val popup: BuildPopup) {
         private val lines = LinkedHashMap<String, String>()
@@ -1042,7 +1129,13 @@ class MainActivity : AppCompatActivity() {
                     w.evaluateJavascript("window.__hf+='$part';", null)
                     i += 200_000
                 }
-                w.evaluateJavascript(Handoff.BUILD_JS.replace("__NAME__", JSONObject.quote(f.name)), null)
+                val mime = when (f.extension.lowercase()) {
+                    "txt" -> "text/plain"
+                    "md" -> "text/markdown"
+                    "zip" -> "application/zip"
+                    else -> "application/octet-stream"
+                }
+                w.evaluateJavascript(Handoff.BUILD_JS.replace("__NAME__", JSONObject.quote(f.name)).replace("__MIME__", JSONObject.quote(mime)), null)
                 val cleanup = { w.evaluateJavascript("window.__hf='';window.__hfDt=null;", null) }
                 tryInject(w, f.name, "input") { ok1 ->
                     if (ok1) { cleanup(); result(true) }

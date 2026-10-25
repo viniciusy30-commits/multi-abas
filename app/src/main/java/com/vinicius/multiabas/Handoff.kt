@@ -122,10 +122,10 @@ if(!all.length)all=document.querySelectorAll('.font-claude-response,.font-claude
 var m=all[all.length-1];if(!m)return '';
 return (m.innerText||'').trim();})();"""
 
-    /** Monta o File do ZIP (base64 já em window.__hf) e guarda em window.__hfDt. */
+    /** Monta o File do anexo (base64 já em window.__hf) e guarda em window.__hfDt. */
     const val BUILD_JS = """(function(name){try{var b=atob(window.__hf);var u=new Uint8Array(b.length);
 for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
-var f=new File([u],name,{type:'application/zip'});var dt=new DataTransfer();dt.items.add(f);
+var f=new File([u],name,{type:__MIME__});var dt=new DataTransfer();dt.items.add(f);
 window.__hfDt=dt;window.__hf='';return 'ok';}catch(e){return 'err:'+e.message;}})(__NAME__);"""
 
     /** Entrega o arquivo à página: direto no input[type=file] ou simulando arrastar-e-soltar. */
