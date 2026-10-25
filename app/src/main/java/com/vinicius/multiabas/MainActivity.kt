@@ -801,11 +801,29 @@ class MainActivity : AppCompatActivity() {
                 if (snap != null) {
                     Handoff.save(this, t.id, snap)
                     if (snap.limit) {
+                        applyLimitTime(t, snap.until)
                         if (limitAsked.add(t.id)) offerHandoff(t)
                     } else limitAsked.remove(t.id)
                 }
             }
         }
+    }
+
+    /** Lê o "até 05:40" do aviso do Claude e preenche o cronômetro da aba. */
+    private fun applyLimitTime(t: Tab, hhmm: String) {
+        try {
+            if (hhmm.isBlank() || t.until > System.currentTimeMillis()) return
+            val h = hhmm.substringBefore(':').toInt()
+            val m = hhmm.substringAfter(':').toInt()
+            val c = java.util.Calendar.getInstance()
+            c.set(java.util.Calendar.HOUR_OF_DAY, h)
+            c.set(java.util.Calendar.MINUTE, m)
+            c.set(java.util.Calendar.SECOND, 0)
+            c.set(java.util.Calendar.MILLISECOND, 0)
+            if (c.timeInMillis <= System.currentTimeMillis()) c.add(java.util.Calendar.DAY_OF_YEAR, 1)
+            t.until = c.timeInMillis
+            save(); tickNow()
+        } catch (_: Exception) { }
     }
 
     private fun offerHandoff(t: Tab) {
@@ -842,10 +860,9 @@ class MainActivity : AppCompatActivity() {
         val labels = others.map {
             it.name + if (it.until > now) "  ·  limite até " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(it.until)) else "  ·  liberada"
         }.toTypedArray()
-        val info = Handoff.chatInfo(this, from.id)
+        if (Handoff.chatInfo(this, from.id) == null) say("Sem conversa salva nesta aba — vai só o código do projeto.", true)
         MaterialAlertDialogBuilder(this)
             .setTitle("Continuar em qual conta?")
-            .setMessage(if (info != null) "Conversa salva: $info" else "Sem conversa salva — vai só o código do projeto.")
             .setItems(labels) { _, which -> startHandoff(from, others[which]) }
             .setNegativeButton("Cancelar", null)
             .show()
