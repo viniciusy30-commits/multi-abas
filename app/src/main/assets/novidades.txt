@@ -1,3 +1,18 @@
+#id 2026-10-25-b
+#titulo Visual novo + tudo mais fácil
+- Interface redesenhada: abas com avatar colorido, endereço em pílula e dock de favoritos
+- Menu virou painel com atalhos grandes: enviar main, baixar APK, abrir jogo, projetos e ajustes
+- Projetos e ajustes em painéis com ícones; segundo plano agora é um interruptor
+- Novo: Baixar APK mais recente do projeto, com barra de progresso e botão de instalar
+- Popup do build com passos coloridos (✓ ✗ ⏳) e progresso do download
+- Avisos rápidos no rodapé em vez de balões
+
+#id 2026-10-25-a
+#titulo Build ao vivo + anexar melhorado
+- Ao baixar um ZIP do Claude, abre um popup mostrando o envio e os passos do build em tempo real
+- ZIPs baixados por link normal (não só blob) agora também vão pra _incoming/
+- Anexar: escolha entre Foto/vídeo (galeria) ou Arquivo (gerenciador, já na pasta Downloads)
+
 #id 2026-10-24-e
 #titulo Main do repo pro Claude
 - Menu: Enviar main pro Claude — baixa o ZIP do branch do projeto e anexa no chat aberto

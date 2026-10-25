@@ -27,13 +27,21 @@ object GitHubDelivery {
 
     data class Result(val ok: Boolean, val message: String, val htmlUrl: String? = null)
 
-    fun deliver(ctx: Context, project: Project, fileName: String, bytes: ByteArray, onStatus: (String) -> Unit) {
+    fun deliver(
+        ctx: Context, project: Project, fileName: String, bytes: ByteArray,
+        onStatus: (String) -> Unit,
+        onSteps: (String) -> Unit = {},
+        onDone: (Boolean, String?, File?) -> Unit = { _, _, _ -> },
+        onProgress: (Int) -> Unit = {}
+    ) {
         Thread {
             try {
+                val t0 = System.currentTimeMillis()
                 val token = Projects.token(ctx)
                 if (token.isBlank()) {
                     onStatus("Configure o token do GitHub em Configurações")
                     notify(ctx, "Falta token", "Abra Configurações e cole o Personal Access Token", null)
+                    onDone(false, null, null)
                     return@Thread
                 }
                 onStatus("Resolvendo branch…")
@@ -49,53 +57,63 @@ object GitHubDelivery {
                 if (!put.ok) {
                     onStatus(put.message)
                     notify(ctx, "Falha no envio", put.message, put.htmlUrl)
+                    onDone(false, put.htmlUrl, null)
                     return@Thread
                 }
                 onStatus("ZIP enviado. Aguardando workflow…")
                 notify(ctx, "ZIP enviado", "${project.name}: $fileName", put.htmlUrl)
 
                 Thread.sleep(4000)
-                val run = waitForRun(token, project, branch, onStatus)
+                val run = waitForRun(token, project, branch, t0, onStatus, onSteps)
                 if (run == null) {
                     onStatus("Envio ok. Não encontrei o workflow (confira Actions).")
                     notify(ctx, "Enviado", "ZIP no repo. Confira Actions se o build rodou.", actionsUrl(project))
+                    onDone(false, actionsUrl(project), null)
                     return@Thread
                 }
                 when (run.status) {
                     "success" -> {
                         onStatus("Build OK ✓ — buscando APK…")
                         notify(ctx, "Build OK ✓", "${project.name}: baixando APK…", run.html)
-                        val apk = downloadLatestApk(ctx, token, project, onStatus)
+                        val apk = downloadLatestApk(ctx, token, project, onStatus, 6 * 60 * 1000L, onProgress)
                         if (apk != null) {
-                            onStatus("APK pronto — toque na notificação para instalar")
+                            onStatus("APK pronto ✓")
                             notifyInstall(ctx, project, apk)
+                            onDone(true, run.html, apk)
                         } else {
                             onStatus("Build OK, mas não achei APK na release")
                             notify(ctx, "Build OK", "Sem APK na release. Confira o workflow.", run.html)
+                            onDone(false, run.html, null)
                         }
                     }
                     "failure", "cancelled", "timed_out" -> {
                         onStatus("Build falhou ✗")
                         notify(ctx, "Build falhou ✗", "${project.name}: veja o log", run.html)
+                        onDone(false, run.html, null)
                     }
                     else -> {
                         onStatus("Workflow: ${run.status}")
                         notify(ctx, "Workflow ${run.status}", project.name, run.html)
+                        onDone(false, run.html, null)
                     }
                 }
             } catch (e: Exception) {
                 val msg = e.message ?: "erro desconhecido"
                 onStatus("Erro: $msg")
                 notify(ctx, "Erro na entrega", msg, null)
+                onDone(false, null, null)
             }
         }.start()
     }
 
-    fun downloadLatestApk(ctx: Context, token: String, p: Project, onStatus: (String) -> Unit): File? {
+    fun downloadLatestApk(
+        ctx: Context, token: String, p: Project, onStatus: (String) -> Unit,
+        waitMs: Long = 6 * 60 * 1000L, onProgress: (Int) -> Unit = {}
+    ): File? {
         return try {
             var assetUrl: String? = null
             var assetName = "update.apk"
-            val deadline = System.currentTimeMillis() + 6 * 60 * 1000L
+            val deadline = System.currentTimeMillis() + waitMs
             while (System.currentTimeMillis() < deadline && assetUrl == null) {
                 val rel = apiGet(token, "/repos/${p.fullRepo()}/releases/latest")
                 if (rel != null) {
@@ -136,8 +154,27 @@ object GitHubDelivery {
             c.setRequestProperty("Authorization", "Bearer $token")
             c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
             if (c.responseCode !in 200..299) return null
+            val total = c.contentLengthLong
             c.inputStream.use { input ->
-                out.outputStream().use { output -> input.copyTo(output) }
+                out.outputStream().use { output ->
+                    val buf = ByteArray(32 * 1024)
+                    var done = 0L
+                    var lastPct = -1
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        output.write(buf, 0, n)
+                        done += n
+                        if (total > 0) {
+                            val pct = (done * 100 / total).toInt()
+                            if (pct != lastPct) {
+                                lastPct = pct
+                                onProgress(pct)
+                                onStatus("Baixando $assetName… $pct%")
+                            }
+                        }
+                    }
+                }
             }
             out
         } catch (_: Exception) {
@@ -228,7 +265,7 @@ object GitHubDelivery {
     private fun putFile(
         token: String, p: Project, branch: String, path: String, bytes: ByteArray, message: String
     ): Result {
-        val existing = apiGet(token, "/repos/${p.fullRepo()}/contents/$path?ref=$branch")
+        val existing = apiGet(token, "/repos/${p.fullRepo()}/contents/${Uri.encode(path, "/")}?ref=${Uri.encode(branch)}")
         val sha = existing?.optString("sha")
         val body = JSONObject()
             .put("message", message)
@@ -236,7 +273,7 @@ object GitHubDelivery {
             .put("branch", branch)
         if (!sha.isNullOrBlank()) body.put("sha", sha)
 
-        val url = URL("$API/repos/${p.fullRepo()}/contents/$path")
+        val url = URL("$API/repos/${p.fullRepo()}/contents/${Uri.encode(path, "/")}")
         val c = url.openConnection() as HttpURLConnection
         c.requestMethod = "PUT"
         c.connectTimeout = 30000
@@ -262,20 +299,23 @@ object GitHubDelivery {
         }
     }
 
-    private fun waitForRun(token: String, p: Project, branch: String, onStatus: (String) -> Unit): RunInfo? {
+    private fun waitForRun(
+        token: String, p: Project, branch: String, since: Long,
+        onStatus: (String) -> Unit, onSteps: (String) -> Unit
+    ): RunInfo? {
         val deadline = System.currentTimeMillis() + 12 * 60 * 1000L
         var html: String? = null
         var saw = false
         while (System.currentTimeMillis() < deadline) {
-            val j = apiGet(token, "/repos/${p.fullRepo()}/actions/runs?branch=$branch&per_page=8")
+            val j = apiGet(token, "/repos/${p.fullRepo()}/actions/runs?branch=${Uri.encode(branch)}&per_page=8")
             val arr = j?.optJSONArray("workflow_runs")
             if (arr != null) {
-                val now = System.currentTimeMillis()
-                var best: org.json.JSONObject? = null
+                var best: JSONObject? = null
                 for (i in 0 until arr.length()) {
                     val r = arr.getJSONObject(i)
                     val created = parseIso(r.optString("created_at"))
-                    if (now - created > 20 * 60 * 1000L) continue
+                    // só runs criados depois do envio (com folga de 60s para diferença de relógio)
+                    if (created < since - 60 * 1000L) continue
                     val name = r.optString("name").lowercase()
                     val isBuild = name.contains("build") || name.contains("apk") || name.contains("android")
                     if (best == null) best = r
@@ -292,24 +332,71 @@ object GitHubDelivery {
                     val name = best.optString("name")
                     onStatus(
                         when {
-                            status != "completed" -> "$name: $status…"
-                            else -> "$name: $conclusion"
+                            status != "completed" -> "$name: ${statusPt(status)}…"
+                            else -> "$name: ${statusPt(conclusion)}"
                         }
                     )
+                    onSteps(stepsText(token, p, best.optLong("id"), name))
                     if (status == "completed") {
                         val n = name.lowercase()
                         val isBuild = n.contains("build") || n.contains("apk") || n.contains("android")
                         if (!isBuild && conclusion == "success") {
-                            Thread.sleep(8000)
+                            Thread.sleep(4000)
                             continue
                         }
                         return RunInfo(if (conclusion.isBlank()) "completed" else conclusion, html)
                     }
                 }
             }
-            Thread.sleep(8000)
+            Thread.sleep(4000)
         }
         return if (saw) RunInfo("timeout", html) else null
+    }
+
+    private fun statusPt(s: String) = when (s) {
+        "queued" -> "na fila"
+        "in_progress" -> "rodando"
+        "pending", "waiting", "requested" -> "aguardando"
+        "success" -> "sucesso ✓"
+        "failure" -> "falhou ✗"
+        "cancelled" -> "cancelado"
+        "timed_out" -> "tempo esgotado"
+        "skipped" -> "pulado"
+        else -> s
+    }
+
+    /** Monta a lista de jobs/passos do run, com ícone de estado, para o popup. */
+    private fun stepsText(token: String, p: Project, runId: Long, runName: String): String {
+        val sb = StringBuilder("▸ $runName\n")
+        val jobs = apiGet(token, "/repos/${p.fullRepo()}/actions/runs/$runId/jobs")?.optJSONArray("jobs")
+        if (jobs == null || jobs.length() == 0) {
+            sb.append("  ○ aguardando um runner…")
+            return sb.toString()
+        }
+        for (i in 0 until jobs.length()) {
+            val job = jobs.getJSONObject(i)
+            sb.append("\n").append(icon(job.optString("status"), job.optString("conclusion")))
+                .append(" ").append(job.optString("name")).append("\n")
+            val steps = job.optJSONArray("steps") ?: continue
+            for (k in 0 until steps.length()) {
+                val st = steps.getJSONObject(k)
+                sb.append("   ").append(icon(st.optString("status"), st.optString("conclusion")))
+                    .append(" ").append(st.optString("name")).append("\n")
+            }
+        }
+        return sb.toString().trimEnd()
+    }
+
+    private fun icon(status: String, conclusion: String): String = when {
+        status == "completed" -> when (conclusion) {
+            "success" -> "✓"
+            "failure", "timed_out" -> "✗"
+            "cancelled" -> "⊘"
+            "skipped" -> "–"
+            else -> "•"
+        }
+        status == "in_progress" -> "⏳"
+        else -> "○"
     }
 
     private fun parseIso(s: String): Long {

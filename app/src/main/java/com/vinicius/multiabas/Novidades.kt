@@ -1,7 +1,7 @@
 package com.vinicius.multiabas
 
 import android.app.Activity
-import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 object Novidades {
     fun show(a: Activity, force: Boolean) {
@@ -16,7 +16,7 @@ object Novidades {
             p.edit().putString("seen", id).apply()
             val title = lines.firstOrNull { it.startsWith("#titulo ") }?.removePrefix("#titulo ") ?: "O que mudou"
             val body = lines.filter { it.startsWith("- ") }.joinToString("\n") { "• " + it.removePrefix("- ") }
-            AlertDialog.Builder(a).setTitle(title).setMessage(body).setPositiveButton("Legal", null).show()
+            MaterialAlertDialogBuilder(a).setTitle(title).setMessage(body).setPositiveButton("Legal", null).show()
         } catch (e: Exception) { }
     }
 }

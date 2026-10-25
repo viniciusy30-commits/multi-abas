@@ -1,5 +1,13 @@
 <resources>
-    <color name="bg">#0F1115</color>
-    <color name="surface">#1E222B</color>
+    <color name="bg">#0D0F13</color>
+    <color name="surface">#161920</color>
+    <color name="surface2">#1F232C</color>
+    <color name="outline">#2B303B</color>
     <color name="accent">#D97757</color>
+    <color name="accent_soft">#2C1E18</color>
+    <color name="on_accent">#1A0F0B</color>
+    <color name="text">#ECEEF3</color>
+    <color name="muted">#8B92A1</color>
+    <color name="ok">#4ADE80</color>
+    <color name="danger">#FF6B6B</color>
 </resources>

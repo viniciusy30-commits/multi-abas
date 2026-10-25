@@ -15,7 +15,7 @@ import android.webkit.*
 import android.widget.*
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private val webs = HashMap<String, WebView>()
     private lateinit var container: FrameLayout
     private lateinit var urlBar: EditText
+    private lateinit var urlIcon: ImageView
     private lateinit var progress: ProgressBar
     private lateinit var rv: RecyclerView
     private val adapter = TabAdapter()
@@ -79,44 +80,80 @@ class MainActivity : AppCompatActivity() {
             fileCb = null
             return true
         }
+        val types = params.acceptTypes?.filter { it.isNotBlank() } ?: emptyList()
+        val multi = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+        val onlyMedia = types.isEmpty() || types.all { t ->
+            val x = t.lowercase()
+            x.startsWith("image") || x.startsWith("video") || x == "*/*" || x == "."
+        }
+        // Site pediu um tipo específico (pdf, zip…): vai direto pro gerenciador de arquivos
+        if (!onlyMedia) return launchFilePicker(types, multi)
+
+        // Caso geral: pergunta se é foto/vídeo (galeria) ou arquivo (gerenciador, pasta Downloads)
         return try {
-            val types = params.acceptTypes?.filter { it.isNotBlank() } ?: emptyList()
-            val joined = types.joinToString(",").lowercase()
-            val wantsImage = types.isEmpty() || joined.contains("image") || joined.contains("*/*")
-            val wantsVideo = joined.contains("video")
-            val onlyMedia = types.isEmpty() || types.all { t ->
-                val x = t.lowercase()
-                x.startsWith("image") || x.startsWith("video") || x == "*/*" || x == "." || x.isBlank()
-            }
-            // Claude costuma pedir image/* ou deixar vazio para anexos de mídia
-            if (onlyMedia && (wantsImage || wantsVideo)) {
-                val multi = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
-                val mediaType = when {
-                    wantsImage && wantsVideo -> androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo
-                    wantsVideo && !wantsImage -> androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.VideoOnly
-                    else -> androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Anexar")
+                .setItems(arrayOf("🖼️  Foto ou vídeo", "📁  Arquivo")) { _, which ->
+                    if (which == 0) launchGallery(multi) else launchFilePicker(types, multi)
                 }
-                val req = androidx.activity.result.PickVisualMediaRequest.Builder()
-                    .setMediaType(mediaType)
-                    .build()
-                if (multi) multiPhotoPicker.launch(req) else photoPicker.launch(req)
-                true
-            } else {
-                // Outros tipos: seletor de documentos
-                val intent = params.createIntent()
-                // Preferir GET_CONTENT que abre melhor no Android
-                if (intent.action.isNullOrBlank()) intent.action = Intent.ACTION_GET_CONTENT
-                docPicker.launch(intent)
-                true
+                .setOnCancelListener {
+                    fileCb?.onReceiveValue(null)
+                    fileCb = null
+                }
+                .show()
+            true
+        } catch (_: Exception) {
+            fileCb = null
+            false
+        }
+    }
+
+    private fun launchGallery(multi: Boolean) {
+        try {
+            val req = androidx.activity.result.PickVisualMediaRequest.Builder()
+                .setMediaType(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                .build()
+            if (multi) multiPhotoPicker.launch(req) else photoPicker.launch(req)
+        } catch (_: Exception) {
+            fileCb?.onReceiveValue(null)
+            fileCb = null
+        }
+    }
+
+    /** Gerenciador de arquivos do sistema, já abrindo na pasta Downloads. */
+    private fun launchFilePicker(types: List<String>, multi: Boolean): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                if (multi) putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                // Se o site restringiu o tipo, respeita (extensões viram MIME quando possível)
+                val mimes = types.mapNotNull { t ->
+                    val x = t.trim().lowercase()
+                    when {
+                        x.contains("/") -> x
+                        x.startsWith(".") -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(x.removePrefix("."))
+                        else -> null
+                    }
+                }.distinct()
+                if (mimes.isNotEmpty() && mimes.size == types.size && !mimes.contains("*/*")) {
+                    putExtra(Intent.EXTRA_MIME_TYPES, mimes.toTypedArray())
+                }
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    putExtra(
+                        android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                        android.provider.DocumentsContract.buildDocumentUri(
+                            "com.android.externalstorage.documents", "primary:Download"
+                        )
+                    )
+                }
             }
-        } catch (e: Exception) {
-            try {
-                docPicker.launch(params.createIntent())
-                true
-            } catch (_: Exception) {
-                fileCb = null
-                false
-            }
+            docPicker.launch(intent)
+            true
+        } catch (_: Exception) {
+            fileCb?.onReceiveValue(null)
+            fileCb = null
+            false
         }
     }
 
@@ -125,6 +162,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         container = findViewById(R.id.container)
         urlBar = findViewById(R.id.urlBar)
+        urlIcon = findViewById(R.id.urlIcon)
         progress = findViewById(R.id.progress)
         rv = findViewById(R.id.rvTabs)
         rv.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
@@ -140,7 +178,12 @@ class MainActivity : AppCompatActivity() {
         findViewById<ImageButton>(R.id.btnFavAdd).setOnClickListener { editFav(-1) }
         loadFavs()
         findViewById<ImageButton>(R.id.btnAdd).setOnClickListener { addTab() }
-        findViewById<ImageButton>(R.id.btnMenu).setOnClickListener { showMenu(it) }
+        findViewById<ImageButton>(R.id.btnMenu).setOnClickListener { showMenu() }
+        findViewById<ImageButton>(R.id.btnReload).setOnClickListener { webs[tabs[cur].id]?.reload() }
+        urlBar.setOnFocusChangeListener { _, has ->
+            val u = tabs[cur].url
+            if (has) { urlBar.setText(u); urlBar.selectAll() } else urlBar.setText(shownUrl(u))
+        }
         urlBar.setOnEditorActionListener { v, id, _ ->
             if (id == EditorInfo.IME_ACTION_GO) { go(v.text.toString()); true } else false
         }
@@ -153,7 +196,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
         load()
-        if (!profilesOk) Toast.makeText(this, "Seu WebView não separa contas. Atualize o \"Android System WebView\" na Play Store.", Toast.LENGTH_LONG).show()
+        if (!profilesOk) say("Seu WebView não separa contas. Atualize o \"Android System WebView\" na Play Store.", true)
         select(cur)
         Updater.autoCheck(this)
         Novidades.show(this, false)
@@ -243,17 +286,17 @@ class MainActivity : AppCompatActivity() {
                     else if (!clean.contains('.')) clean + "." + ext else clean
                 saveBytes(bytes, fin, mime)
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Salvo em Downloads: $fin", Toast.LENGTH_LONG).show()
+                    say("Salvo em Downloads: $fin", true)
                     maybeDeliverZip(fin, bytes)
                 }
             } catch (e: Exception) {
-                runOnUiThread { Toast.makeText(this@MainActivity, "Falha ao salvar o arquivo", Toast.LENGTH_LONG).show() }
+                runOnUiThread { say("Falha ao salvar o arquivo", true) }
             }
         }
         @JavascriptInterface
         fun fail(token: String) {
             dlTokens.remove(token)
-            runOnUiThread { Toast.makeText(this@MainActivity, "Não foi possível baixar", Toast.LENGTH_LONG).show() }
+            runOnUiThread { say("Não foi possível baixar", true) }
         }
     }
 
@@ -270,6 +313,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun enqueueDownload(u: String, ua: String, cd: String?, mime: String?, w: WebView) {
+        try {
+            val name = URLUtil.guessFileName(u, cd, mime)
+            val r = DownloadManager.Request(Uri.parse(u))
+            r.setMimeType(mime); r.addRequestHeader("User-Agent", ua)
+            val ck = if (profilesOk) WebViewCompat.getProfile(w).cookieManager.getCookie(u) else CookieManager.getInstance().getCookie(u)
+            if (ck != null) r.addRequestHeader("Cookie", ck)
+            r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            try { r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name) }
+            catch (e: Exception) { r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, name) }
+            (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(r)
+            say("Baixando $name")
+        } catch (e: Exception) { say("Não foi possível baixar") }
+    }
+
     private fun setupDownload(w: WebView) {
         w.addJavascriptInterface(Bridge(), "AndroidDl")
         w.setDownloadListener { u, ua, cd, mime, _ ->
@@ -282,21 +340,40 @@ class MainActivity : AppCompatActivity() {
                     "x.onload=function(){var r=new FileReader();r.onloadend=function(){AndroidDl.save('" + tk + "',r.result,'" + mt + "',fn);};r.readAsDataURL(x.response);};" +
                     "x.onerror=function(){AndroidDl.fail('" + tk + "');};x.send();})()"
                 w.evaluateJavascript(js, null)
-                Toast.makeText(this, "Baixando…", Toast.LENGTH_SHORT).show()
+                say("Baixando…")
                 return@setDownloadListener
             }
-            try {
-                val name = URLUtil.guessFileName(u, cd, mime)
-                val r = DownloadManager.Request(Uri.parse(u))
-                r.setMimeType(mime); r.addRequestHeader("User-Agent", ua)
-                val ck = if (profilesOk) WebViewCompat.getProfile(w).cookieManager.getCookie(u) else CookieManager.getInstance().getCookie(u)
-                if (ck != null) r.addRequestHeader("Cookie", ck)
-                r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                try { r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name) }
-                catch (e: Exception) { r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, name) }
-                (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(r)
-                Toast.makeText(this, "Baixando $name", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) { Toast.makeText(this, "Não foi possível baixar", Toast.LENGTH_SHORT).show() }
+            val name = URLUtil.guessFileName(u, cd, mime)
+            val looksZip = name.lowercase().endsWith(".zip") || (mime ?: "").lowercase().contains("zip")
+            if (looksZip && u.startsWith("http") && Projects.current(this) != null && Projects.token(this).isNotBlank()) {
+                // ZIP: baixa dentro do app para poder entregar no GitHub (DownloadManager não devolve os bytes)
+                val zipName = if (name.lowercase().endsWith(".zip")) name else name.substringBeforeLast('.', name) + ".zip"
+                val ck = try {
+                    if (profilesOk) WebViewCompat.getProfile(w).cookieManager.getCookie(u) else CookieManager.getInstance().getCookie(u)
+                } catch (_: Exception) { null }
+                say("Baixando $zipName…")
+                Thread {
+                    try {
+                        val c = java.net.URL(u).openConnection() as java.net.HttpURLConnection
+                        c.connectTimeout = 30000
+                        c.readTimeout = 120000
+                        c.setRequestProperty("User-Agent", ua)
+                        if (ck != null) c.setRequestProperty("Cookie", ck)
+                        if (c.responseCode !in 200..299) throw Exception("HTTP " + c.responseCode)
+                        val bytes = c.inputStream.use { it.readBytes() }
+                        saveBytes(bytes, zipName, "application/zip")
+                        runOnUiThread {
+                            say("Salvo em Downloads: $zipName", true)
+                            maybeDeliverZip(zipName, bytes)
+                        }
+                    } catch (e: Exception) {
+                        // não deu pelo app: cai no download normal
+                        runOnUiThread { enqueueDownload(u, ua, cd, mime, w) }
+                    }
+                }.start()
+                return@setDownloadListener
+            }
+            enqueueDownload(u, ua, cd, mime, w)
         }
     }
 
@@ -322,7 +399,7 @@ class MainActivity : AppCompatActivity() {
         val tb = tabs.firstOrNull { it.id == v.tag } ?: return
         if (u == null) return
         tb.url = u
-        if (tabs[cur].id == tb.id && !urlBar.hasFocus()) urlBar.setText(u)
+        if (tabs[cur].id == tb.id && !urlBar.hasFocus()) setUrlText(u)
         save()
     }
 
@@ -335,7 +412,7 @@ class MainActivity : AppCompatActivity() {
         for (k in 0 until container.childCount) container.getChildAt(k).visibility = View.GONE
         w.alpha = 0f; w.visibility = View.VISIBLE
         w.animate().alpha(1f).setDuration(180).start()
-        urlBar.setText(t.url)
+        setUrlText(t.url)
         progress.visibility = View.GONE
         adapter.notifyDataSetChanged()
         rv.scrollToPosition(i)
@@ -351,13 +428,54 @@ class MainActivity : AppCompatActivity() {
         }
         webs[tabs[cur].id]?.loadUrl(u)
         urlBar.clearFocus()
+        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+            .hideSoftInputFromWindow(urlBar.windowToken, 0)
+    }
+
+    private fun dp(v: Int) = Ui.dp(this, v)
+
+    /** Aviso rápido no rodapé (acima da dock), no lugar do Toast. */
+    private fun say(msg: String, long: Boolean = false) {
+        try {
+            val sb = com.google.android.material.snackbar.Snackbar.make(
+                findViewById<View>(android.R.id.content), msg,
+                if (long) com.google.android.material.snackbar.Snackbar.LENGTH_LONG
+                else com.google.android.material.snackbar.Snackbar.LENGTH_SHORT
+            )
+            sb.setAnchorView(R.id.dock)
+            sb.setBackgroundTint(Color.parseColor("#252A35"))
+            sb.setTextColor(Color.WHITE)
+            sb.view.findViewById<TextView>(com.google.android.material.R.id.snackbar_text)?.maxLines = 4
+            sb.show()
+        } catch (_: Exception) { }
+    }
+
+    private fun confirm(title: String, msg: String, okLabel: String, ok: () -> Unit) {
+        MaterialAlertDialogBuilder(this).setTitle(title).setMessage(msg)
+            .setPositiveButton(okLabel) { _, _ -> ok() }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun shownUrl(u: String): String = try {
+        Uri.parse(u).host?.removePrefix("www.")?.ifBlank { null } ?: u
+    } catch (_: Exception) { u }
+
+    private fun setUrlText(u: String) {
+        urlBar.setText(if (urlBar.hasFocus()) u else shownUrl(u))
+        urlIcon.setColorFilter(Color.parseColor(if (u.startsWith("https")) "#8B92A1" else "#FF6B6B"))
     }
 
     private fun input(title: String, def: String, ok: (String) -> Unit) {
-        val e = EditText(this); e.setText(def); e.setSingleLine(); e.selectAll()
-        AlertDialog.Builder(this).setTitle(title).setView(e)
+        val (til, e) = Ui.field(this, "Nome", def)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(24), dp(8), dp(24), 0)
+        box.addView(til)
+        MaterialAlertDialogBuilder(this).setTitle(title).setView(box)
             .setPositiveButton("OK") { _, _ -> val n = e.text.toString().trim(); if (n.isNotEmpty()) ok(n) }
             .setNegativeButton("Cancelar", null).show()
+        e.requestFocus()
+        e.selectAll()
     }
 
     private fun addTab() = input("Nome da nova aba", "Conta ${tabs.size + 1}") {
@@ -366,19 +484,26 @@ class MainActivity : AppCompatActivity() {
 
     private fun tabOptions(i: Int) {
         if (i < 0 || i >= tabs.size) return
-        AlertDialog.Builder(this).setTitle(tabs[i].name)
-            .setItems(arrayOf("Renomear", "Recarregar", "Definir volta do limite", "Limpar limite", "Fechar aba")) { _, w ->
-                when (w) {
-                    0 -> input("Renomear aba", tabs[i].name) { tabs[i].name = it; adapter.notifyDataSetChanged(); save() }
-                    1 -> webs[tabs[i].id]?.reload()
-                    2 -> pickLimit(i)
-                    3 -> { tabs[i].until = 0L; save(); tickNow() }
-                    4 -> AlertDialog.Builder(this).setTitle("Fechar \"${tabs[i].name}\"?")
-                        .setMessage("O login dessa aba será apagado.")
-                        .setPositiveButton("Fechar") { _, _ -> closeTab(i) }
-                        .setNegativeButton("Cancelar", null).show()
-                }
-            }.show()
+        val t = tabs[i]
+        val sh = Sheet(this).title(t.name, "Conta separada, com login e cookies próprios")
+        sh.row(R.drawable.ic_edit, "Renomear") {
+            input("Renomear aba", t.name) { t.name = it; adapter.notifyDataSetChanged(); save() }
+        }
+        sh.row(R.drawable.ic_refresh, "Recarregar") { webs[t.id]?.reload() }
+        sh.row(R.drawable.ic_timer, "Definir volta do limite", "Mostra um cronômetro na aba") {
+            val idx = tabs.indexOf(t)
+            if (idx >= 0) pickLimit(idx)
+        }
+        if (t.until > 0L) {
+            sh.row(R.drawable.ic_close, "Limpar limite") { t.until = 0L; save(); tickNow() }
+        }
+        sh.row(R.drawable.ic_delete, "Fechar aba", "O login dessa aba será apagado", danger = true) {
+            confirm("Fechar \"${t.name}\"?", "O login dessa aba será apagado.", "Fechar") {
+                val idx = tabs.indexOf(t)
+                if (idx >= 0) closeTab(idx)
+            }
+        }
+        sh.show()
     }
 
     private fun closeTab(i: Int) {
@@ -389,88 +514,104 @@ class MainActivity : AppCompatActivity() {
         select(minOf(i, tabs.size - 1))
     }
 
-    private fun showMenu(anchor: View) {
-        val m = PopupMenu(this, anchor)
+    private fun showMenu() {
         val proj = Projects.current(this)
-        val projLabel = if (proj == null) "Projeto atual: (nenhum)" else "Projeto atual: ${proj.name}"
-        m.menu.add(0, 10, 0, projLabel)
-        m.menu.add(0, 11, 1, "Gerenciar projetos")
-        m.menu.add(0, 12, 2, "Abrir jogo")
-        m.menu.add(0, 13, 3, "Enviar main pro Claude")
-        m.menu.add(0, 1, 4, "Recarregar")
-        m.menu.add(0, 2, 5, "Configurações")
-        m.setOnMenuItemClickListener {
-            when (it.itemId) {
-                10, 11 -> projectPicker()
-                12 -> openCurrentGame()
-                13 -> sendMainToClaude()
-                1 -> webs[tabs[cur].id]?.reload()
-                2 -> settings()
-            }
-            true
+        val hasToken = Projects.token(this).isNotBlank()
+        val sh = Sheet(this).title("Multi Abas", "Versão ${BuildConfig.VERSION_NAME}")
+        val ptitle = proj?.name ?: "Escolher projeto"
+        val psub = when {
+            proj == null -> "Escolha o repositório que recebe os ZIPs do Claude"
+            !hasToken -> "${proj.fullRepo()} · falta o token do GitHub"
+            else -> "${proj.fullRepo()} · entrega automática ativa"
         }
-        m.show()
+        sh.row(R.drawable.ic_code, ptitle, psub, highlighted = true) { projectPicker() }
+        sh.section("Ações rápidas")
+        sh.tiles(listOf(
+            Tile(R.drawable.ic_send, "Enviar main pro Claude") { sendMainToClaude() },
+            Tile(R.drawable.ic_download, "Baixar APK") { downloadLatestApkNow() },
+            Tile(R.drawable.ic_play, "Abrir jogo") { openCurrentGame() },
+            Tile(R.drawable.ic_refresh, "Recarregar") { webs[tabs[cur].id]?.reload() },
+            Tile(R.drawable.ic_folder, "Projetos") { projectPicker() },
+            Tile(R.drawable.ic_settings, "Ajustes") { settings() }
+        ))
+        sh.show()
     }
 
     private fun settings() {
-        val items = arrayOf(
-            "Token do GitHub",
-            "Projeto atual / gerenciar",
-            "Segundo plano (manter Claude vivo)",
-            "Verificar atualização",
-            "O que mudou"
-        )
-        AlertDialog.Builder(this).setTitle("Configurações — v${BuildConfig.VERSION_NAME}")
-            .setItems(items) { _, w ->
-                when (w) {
-                    0 -> editToken()
-                    1 -> projectPicker()
-                    2 -> toggleKeepAlive()
-                    3 -> Updater.check(this, true)
-                    4 -> Novidades.show(this, true)
-                }
-            }
-            .setNegativeButton("Fechar", null).show()
+        val tk = Projects.token(this)
+        val sh = Sheet(this).title("Ajustes", "Multi Abas v${BuildConfig.VERSION_NAME}")
+        sh.section("GitHub")
+        sh.row(
+            R.drawable.ic_key, "Token do GitHub",
+            if (tk.isBlank()) "Não configurado — toque para colar" else "Configurado · ••••" + tk.takeLast(4)
+        ) { editToken() }
+        sh.row(R.drawable.ic_folder, "Projetos", "Escolher e gerenciar repositórios") { projectPicker() }
+        sh.section("App")
+        sh.switchRow(
+            R.drawable.ic_bolt, "Segundo plano", "Mantém o Claude rodando ao minimizar",
+            prefs.getBoolean("keepalive", true)
+        ) { on -> setKeepAlive(on) }
+        sh.row(R.drawable.ic_download, "Verificar atualização", "Procura uma versão nova do app") { Updater.check(this, true) }
+        sh.row(R.drawable.ic_info, "O que mudou", "Novidades desta versão") { Novidades.show(this, true) }
+        sh.show()
     }
 
     private fun editToken() {
-        val e = EditText(this)
-        e.setSingleLine()
-        e.hint = "ghp_… ou github_pat_…"
-        e.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        val cur = Projects.token(this)
-        if (cur.isNotEmpty()) e.setText(cur)
-        AlertDialog.Builder(this).setTitle("Token do GitHub")
+        val (til, e) = Ui.field(this, "ghp_… ou github_pat_…", Projects.token(this), password = true)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(24), dp(8), dp(24), 0)
+        box.addView(til)
+        MaterialAlertDialogBuilder(this).setTitle("Token do GitHub")
             .setMessage("Personal Access Token com permissão de conteúdo (repo) e actions. Cole aqui e salve.")
-            .setView(e)
+            .setView(box)
             .setPositiveButton("Salvar") { _, _ ->
-                Projects.setToken(this, e.text.toString())
-                Toast.makeText(this, if (e.text.toString().trim().isEmpty()) "Token apagado" else "Token salvo", Toast.LENGTH_SHORT).show()
+                val v = e.text.toString().trim()
+                Projects.setToken(this, v)
+                say(if (v.isEmpty()) "Token apagado" else "Token salvo ✓")
             }
             .setNegativeButton("Cancelar", null).show()
     }
 
-    private fun toggleKeepAlive() {
-        val on = prefs.getBoolean("keepalive", true)
-        val msg = if (on)
-            "Segundo plano está LIGADO.\nO Claude continua quando você minimiza (notificação fixa)."
-        else
-            "Segundo plano está DESLIGADO.\nAo minimizar, o sistema pode interromper o Claude."
-        AlertDialog.Builder(this).setTitle("Segundo plano")
-            .setMessage(msg)
-            .setPositiveButton(if (on) "Desligar" else "Ligar") { _, _ ->
-                val next = !on
-                prefs.edit().putBoolean("keepalive", next).apply()
-                if (next) {
-                    maybeRequestNotifPermission()
-                    KeepAliveService.start(this)
-                    Toast.makeText(this, "Segundo plano ligado", Toast.LENGTH_SHORT).show()
-                } else {
-                    KeepAliveService.stop(this)
-                    Toast.makeText(this, "Segundo plano desligado", Toast.LENGTH_SHORT).show()
-                }
+    private fun setKeepAlive(on: Boolean) {
+        prefs.edit().putBoolean("keepalive", on).apply()
+        if (on) {
+            maybeRequestNotifPermission()
+            KeepAliveService.start(this)
+            say("Segundo plano ligado")
+        } else {
+            KeepAliveService.stop(this)
+            say("Segundo plano desligado")
+        }
+    }
+
+    /** Baixa o APK da última release do projeto atual, com progresso, e oferece instalar. */
+    private fun downloadLatestApkNow() {
+        val p = Projects.current(this)
+        if (p == null) {
+            say("Defina um Projeto atual primeiro")
+            projectPicker()
+            return
+        }
+        val token = Projects.token(this)
+        if (token.isBlank()) {
+            say("Configure o Token do GitHub em Ajustes", true)
+            editToken()
+            return
+        }
+        val popup = BuildPopup(this, p.name, "Baixar APK")
+        popup.show()
+        popup.status("Procurando a última versão…")
+        Thread {
+            val apk = GitHubDelivery.downloadLatestApk(this, token, p, { popup.status(it) }, 20_000L) { popup.progress(it) }
+            if (apk != null) {
+                popup.status("APK pronto ✓")
+                popup.done(true, null, apk)
+            } else {
+                popup.status("Não achei APK na última release ✗")
+                popup.done(false, null, null)
             }
-            .setNegativeButton("Fechar", null).show()
+        }.start()
     }
 
     private fun maybeRequestNotifPermission() {
@@ -481,36 +622,49 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun looksLikeZipBytes(b: ByteArray) =
+        b.size > 4 && b[0] == 0x50.toByte() && b[1] == 0x4B.toByte() && b[2] == 0x03.toByte() && b[3] == 0x04.toByte()
+
     private fun maybeDeliverZip(name: String, bytes: ByteArray) {
-        if (!name.lowercase().endsWith(".zip")) return
+        val ext = name.substringAfterLast('.', "").lowercase()
+        val isZipName = ext == "zip"
+        // arquivo sem extensão útil (.bin) mas com cabeçalho de ZIP também conta; docx/apk/etc. não
+        val isZipUnknown = (ext == "bin" || ext.isEmpty()) && looksLikeZipBytes(bytes)
+        if (!isZipName && !isZipUnknown) return
+        val zipName = if (isZipName) name else name.substringBeforeLast('.', name) + ".zip"
         val proj = Projects.current(this)
         if (proj == null) {
-            Toast.makeText(this, "ZIP salvo. Defina um Projeto atual no menu para enviar ao GitHub.", Toast.LENGTH_LONG).show()
+            say("ZIP salvo. Defina um Projeto atual no menu para enviar ao GitHub.", true)
             return
         }
         if (Projects.token(this).isBlank()) {
-            Toast.makeText(this, "ZIP salvo. Configure o Token do GitHub em Configurações.", Toast.LENGTH_LONG).show()
+            say("ZIP salvo. Configure o Token do GitHub em Configurações.", true)
             return
         }
-        Toast.makeText(this, "Enviando $name → ${proj.name}…", Toast.LENGTH_SHORT).show()
-        GitHubDelivery.deliver(this, proj, name, bytes) { status ->
-            runOnUiThread { Toast.makeText(this, status, Toast.LENGTH_SHORT).show() }
-        }
+        val popup = BuildPopup(this, proj.name)
+        popup.show()
+        popup.status("Enviando $zipName → ${proj.name}…")
+        GitHubDelivery.deliver(
+            this, proj, zipName, bytes,
+            onStatus = { popup.status(it) },
+            onSteps = { popup.steps(it) },
+            onDone = { ok, url, apk -> popup.done(ok, url, apk) }
+        )
     }
 
     private fun openCurrentGame() {
         val p = Projects.current(this)
         if (p == null) {
-            Toast.makeText(this, "Defina um Projeto atual primeiro", Toast.LENGTH_SHORT).show()
+            say("Defina um Projeto atual primeiro")
             projectPicker()
             return
         }
         if (p.packageName.isBlank()) {
-            Toast.makeText(this, "Package do jogo não detectado. Edite o projeto e preencha.", Toast.LENGTH_LONG).show()
+            say("Package do jogo não detectado. Edite o projeto e preencha.", true)
             return
         }
         if (!GitHubDelivery.openGame(this, p)) {
-            Toast.makeText(this, "Jogo não instalado. Use Baixar APK mais recente.", Toast.LENGTH_LONG).show()
+            say("Jogo não instalado. Use Baixar APK mais recente.", true)
         }
     }
 
@@ -520,20 +674,20 @@ class MainActivity : AppCompatActivity() {
     private fun sendMainToClaude() {
         val p = Projects.current(this)
         if (p == null) {
-            Toast.makeText(this, "Defina um Projeto atual primeiro", Toast.LENGTH_SHORT).show()
+            say("Defina um Projeto atual primeiro")
             projectPicker()
             return
         }
         val token = Projects.token(this)
         // token ajuda em repo privado; público funciona sem
-        Toast.makeText(this, "Baixando main de ${p.name}…", Toast.LENGTH_SHORT).show()
+        say("Baixando main de ${p.name}…")
         Thread {
             try {
                 val branch = p.branch.ifBlank { "main" }
                 val zip = GitHubDelivery.downloadRepoZip(this, token, p, branch)
                 if (zip == null || !zip.exists()) {
                     runOnUiThread {
-                        Toast.makeText(this, "Não foi possível baixar o ZIP de ${p.fullRepo()}@$branch", Toast.LENGTH_LONG).show()
+                        say("Não foi possível baixar o ZIP de ${p.fullRepo()}@$branch", true)
                     }
                     return@Thread
                 }
@@ -542,12 +696,12 @@ class MainActivity : AppCompatActivity() {
                 )
                 runOnUiThread {
                     pendingClaudeFile = arrayOf(uri)
-                    Toast.makeText(this, "Anexando ${zip.name} no Claude…", Toast.LENGTH_SHORT).show()
+                    say("Anexando ${zip.name} no Claude…")
                     triggerClaudeAttach()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(this, "Erro: ${e.message}", Toast.LENGTH_LONG).show()
+                    say("Erro: ${e.message}", true)
                 }
             }
         }.start()
@@ -556,7 +710,7 @@ class MainActivity : AppCompatActivity() {
     /** Clica no botão de anexar / input file da página do Claude. */
     private fun triggerClaudeAttach() {
         val w = webs[tabs.getOrNull(cur)?.id] ?: run {
-            Toast.makeText(this, "Nenhuma aba aberta", Toast.LENGTH_SHORT).show()
+            say("Nenhuma aba aberta")
             pendingClaudeFile = null
             return
         }
@@ -598,16 +752,12 @@ class MainActivity : AppCompatActivity() {
                     w.evaluateJavascript(js) { r2 ->
                         val x = r2?.trim('"') ?: "null"
                         if (x == "none" || x == "null") {
-                            Toast.makeText(
-                                this,
-                                "Não achei o botão de anexar. Abra o Claude, foque no chat e tente de novo.",
-                                Toast.LENGTH_LONG
-                            ).show()
+                            say("Não achei o botão de anexar. Abra o Claude, foque no chat e tente de novo.", true)
                             // limpa pendência se o chooser não abrir em 8s
                             w.postDelayed({
                                 if (pendingClaudeFile != null) {
                                     pendingClaudeFile = null
-                                    Toast.makeText(this, "Envio cancelado (chooser não abriu)", Toast.LENGTH_SHORT).show()
+                                    say("Envio cancelado (chooser não abriu)")
                                 }
                             }, 8000)
                         }
@@ -620,50 +770,45 @@ class MainActivity : AppCompatActivity() {
     private fun projectPicker() {
         val list = Projects.load(this)
         val curId = Projects.currentId(this)
-        val labels = mutableListOf<String>()
-        list.forEach {
-            val mark = if (it.id == curId) "✓ " else ""
-            val br = if (it.branch.isBlank()) "auto" else it.branch
-            labels.add("$mark${it.name}  (${it.fullRepo()} · $br/${it.folder})")
-        }
-        labels.add("+ Adicionar do GitHub…")
-        AlertDialog.Builder(this).setTitle("Projeto atual")
-            .setItems(labels.toTypedArray()) { _, w ->
-                if (w == list.size) pickRepoFromGitHub()
-                else {
-                    Projects.setCurrentId(this, list[w].id)
-                    Toast.makeText(this, "Projeto: ${list[w].name}", Toast.LENGTH_SHORT).show()
-                    projectOptions(w)
-                }
+        val sh = Sheet(this).title("Projetos", "Para onde vão os ZIPs que você baixa do Claude")
+        if (list.isEmpty()) sh.note("Nenhum projeto ainda. Adicione um repositório do GitHub para ativar a entrega automática.")
+        list.forEachIndexed { idx, p ->
+            val br = if (p.branch.isBlank()) "branch padrão" else p.branch
+            sh.row(
+                R.drawable.ic_code, p.name, "${p.fullRepo()} · $br/${p.folder}",
+                highlighted = p.id == curId, onMore = { projectOptions(idx) }
+            ) {
+                Projects.setCurrentId(this, p.id)
+                say("Projeto atual: ${p.name}")
             }
-            .setNegativeButton("Fechar", null).show()
+        }
+        sh.section("Adicionar")
+        sh.row(R.drawable.ic_add, "Do GitHub", "Escolha na lista dos seus repositórios") { pickRepoFromGitHub() }
+        sh.row(R.drawable.ic_edit, "Manualmente", "Informe dono, repositório e pasta") { editProject(-1) }
+        sh.show()
     }
 
     /** Lista os repositórios da sua conta e preenche tudo automaticamente. */
     private fun pickRepoFromGitHub() {
         val token = Projects.token(this)
         if (token.isBlank()) {
-            Toast.makeText(this, "Configure o Token do GitHub em Configurações primeiro", Toast.LENGTH_LONG).show()
+            say("Configure o Token do GitHub em Configurações primeiro", true)
             editToken()
             return
         }
-        Toast.makeText(this, "Carregando repositórios…", Toast.LENGTH_SHORT).show()
+        say("Carregando repositórios…")
         Thread {
             try {
                 val repos = GitHubRepos.listMyRepos(token)
                 runOnUiThread {
                     if (repos.isEmpty()) {
-                        Toast.makeText(this, "Nenhum repositório encontrado (confira o token)", Toast.LENGTH_LONG).show()
+                        say("Nenhum repositório encontrado (confira o token)", true)
                         return@runOnUiThread
                     }
-                    val labels = repos.map { r ->
-                        val d = if (r.description.isNotBlank()) " — ${r.description.take(40)}" else ""
-                        "${r.name}$d"
-                    }.toTypedArray()
-                    AlertDialog.Builder(this).setTitle("Escolha o repositório")
-                        .setItems(labels) { _, w ->
-                            val r = repos[w]
-                            Toast.makeText(this, "Detectando package de ${r.name}…", Toast.LENGTH_SHORT).show()
+                    val sh = Sheet(this).title("Escolha o repositório", "${repos.size} encontrados na sua conta")
+                    repos.forEach { r ->
+                        sh.row(R.drawable.ic_code, r.name, r.description.ifBlank { null }) {
+                            say("Detectando package de ${r.name}…")
                             Thread {
                                 val pkg = try {
                                     GitHubRepos.detectPackage(token, r.owner, r.name, r.defaultBranch)
@@ -671,16 +816,15 @@ class MainActivity : AppCompatActivity() {
                                 val hasInc = try {
                                     GitHubRepos.hasIncoming(token, r.owner, r.name, r.defaultBranch)
                                 } catch (_: Exception) { false }
-                                runOnUiThread {
-                                    addProjectFromRepo(r, pkg, hasInc)
-                                }
+                                runOnUiThread { addProjectFromRepo(r, pkg, hasInc) }
                             }.start()
                         }
-                        .setNegativeButton("Cancelar", null).show()
+                    }
+                    sh.show()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(this, "Erro ao listar: ${e.message}", Toast.LENGTH_LONG).show()
+                    say("Erro ao listar: ${e.message}", true)
                 }
             }
         }.start()
@@ -696,7 +840,7 @@ class MainActivity : AppCompatActivity() {
                 list[existing].packageName = pkg
                 Projects.save(this, list)
             }
-            Toast.makeText(this, "Já cadastrado — projeto atual: ${list[existing].name}", Toast.LENGTH_SHORT).show()
+            say("Já cadastrado — projeto atual: ${list[existing].name}")
             return
         }
         val p = Project(
@@ -717,7 +861,7 @@ class MainActivity : AppCompatActivity() {
             else append("\nPackage não detectado (pode editar depois)")
             if (!hasIncoming) append("\nObs: pasta _incoming não encontrada — o workflow precisa dela")
         }
-        AlertDialog.Builder(this).setTitle("Projeto adicionado")
+        MaterialAlertDialogBuilder(this).setTitle("Projeto adicionado")
             .setMessage(extra)
             .setPositiveButton("OK", null)
             .setNeutralButton("Editar") { _, _ ->
@@ -731,28 +875,31 @@ class MainActivity : AppCompatActivity() {
         val list = Projects.load(this)
         if (i < 0 || i >= list.size) return
         val p = list[i]
-        AlertDialog.Builder(this).setTitle(p.name)
-            .setItems(arrayOf("Usar este projeto", "Abrir jogo", "Editar", "Remover")) { _, w ->
-                when (w) {
-                    0 -> {
-                        Projects.setCurrentId(this, p.id)
-                        Toast.makeText(this, "Projeto atual: ${p.name}", Toast.LENGTH_SHORT).show()
-                    }
-                    1 -> {
-                        Projects.setCurrentId(this, p.id)
-                        openCurrentGame()
-                    }
-                    2 -> editProject(i)
-                    3 -> AlertDialog.Builder(this).setTitle("Remover ${p.name}?")
-                        .setPositiveButton("Remover") { _, _ ->
-                            val id = p.id
-                            val n = list.toMutableList().also { it.removeAt(i) }
-                            Projects.save(this, n)
-                            if (Projects.currentId(this) == id) Projects.setCurrentId(this, n.firstOrNull()?.id ?: "")
-                            Toast.makeText(this, "Removido", Toast.LENGTH_SHORT).show()
-                        }.setNegativeButton("Cancelar", null).show()
-                }
-            }.show()
+        val sh = Sheet(this).title(p.name, p.fullRepo())
+        sh.row(R.drawable.ic_check, "Usar este projeto") {
+            Projects.setCurrentId(this, p.id)
+            say("Projeto atual: ${p.name}")
+        }
+        sh.row(R.drawable.ic_play, "Abrir jogo", p.packageName.ifBlank { "Package não definido" }) {
+            Projects.setCurrentId(this, p.id)
+            openCurrentGame()
+        }
+        sh.row(R.drawable.ic_download, "Baixar APK mais recente") {
+            Projects.setCurrentId(this, p.id)
+            downloadLatestApkNow()
+        }
+        sh.row(R.drawable.ic_edit, "Editar") { editProject(i) }
+        sh.row(R.drawable.ic_delete, "Remover", "Só tira da lista; o repositório não é apagado", danger = true) {
+            confirm("Remover ${p.name}?", "O repositório no GitHub não será apagado.", "Remover") {
+                val id = p.id
+                val n = Projects.load(this)
+                n.removeAll { it.id == id }
+                Projects.save(this, n)
+                if (Projects.currentId(this) == id) Projects.setCurrentId(this, n.firstOrNull()?.id ?: "")
+                say("Removido")
+            }
+        }
+        sh.show()
     }
 
     private fun editProject(i: Int) {
@@ -760,28 +907,27 @@ class MainActivity : AppCompatActivity() {
         val existing = if (i >= 0 && i < list.size) list[i] else null
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
-        box.setPadding(56, 16, 56, 0)
+        box.setPadding(dp(24), dp(8), dp(24), 0)
         fun field(hint: String, value: String): EditText {
-            val e = EditText(this)
-            e.hint = hint
-            e.setSingleLine()
-            e.setText(value)
-            box.addView(e)
+            val (til, e) = Ui.field(this, hint, value)
+            box.addView(til)
             return e
         }
-        val n = field("Nome (ex: Masmorras)", existing?.name ?: "")
-        val owner = field("Dono do repo (ex: viniciusy30-commits)", existing?.owner ?: "viniciusy30-commits")
-        val repo = field("Nome do repositório (ex: masmorras-rpg)", existing?.repo ?: "")
+        val n = field("Nome do projeto", existing?.name ?: "")
+        val owner = field("Dono do repositório", existing?.owner ?: "viniciusy30-commits")
+        val repo = field("Repositório (ex: masmorras-rpg)", existing?.repo ?: "")
         val branch = field("Branch (vazio = padrão do GitHub)", existing?.branch ?: "")
-        val folder = field("Pasta do zip (padrão _incoming)", existing?.folder ?: "_incoming")
+        val folder = field("Pasta do ZIP (padrão _incoming)", existing?.folder ?: "_incoming")
         val pkg = field("Package do jogo (ex: com.vinicius.masmorras)", existing?.packageName ?: "")
-        AlertDialog.Builder(this).setTitle(if (existing == null) "Novo projeto" else "Editar projeto")
-            .setView(box)
+        val scroll = ScrollView(this)
+        scroll.addView(box)
+        MaterialAlertDialogBuilder(this).setTitle(if (existing == null) "Novo projeto" else "Editar projeto")
+            .setView(scroll)
             .setPositiveButton("Salvar") { _, _ ->
                 val name = n.text.toString().trim().ifEmpty { repo.text.toString().trim() }
                 val r = repo.text.toString().trim()
                 if (r.isEmpty()) {
-                    Toast.makeText(this, "Informe o repositório", Toast.LENGTH_SHORT).show()
+                    say("Informe o repositório")
                     return@setPositiveButton
                 }
                 val p = existing ?: Project(System.currentTimeMillis().toString(), name, owner.text.toString().trim(), r)
@@ -795,7 +941,7 @@ class MainActivity : AppCompatActivity() {
                 if (existing == null) nlist.add(p) else nlist[i] = p
                 Projects.save(this, nlist)
                 Projects.setCurrentId(this, p.id)
-                Toast.makeText(this, "Projeto salvo: ${p.name}", Toast.LENGTH_SHORT).show()
+                say("Projeto salvo: ${p.name}")
             }
             .setNegativeButton("Cancelar", null).show()
     }
@@ -820,17 +966,20 @@ class MainActivity : AppCompatActivity() {
     private fun editFav(i: Int) {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
-        box.setPadding(56, 16, 56, 0)
-        val n = EditText(this); n.hint = "Nome"; n.setSingleLine()
-        val u = EditText(this); u.hint = "Link"; u.setSingleLine()
-        u.inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI
-        if (i >= 0) { n.setText(favs[i].name); u.setText(favs[i].url) } else u.setText(tabs[cur].url)
+        box.setPadding(dp(24), dp(8), dp(24), 0)
+        val (nTil, n) = Ui.field(this, "Nome", if (i >= 0) favs[i].name else "")
+        val (uTil, u) = Ui.field(this, "Link", if (i >= 0) favs[i].url else tabs[cur].url)
+        u.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+        val lbl = TextView(this)
+        lbl.text = "Como abrir"
+        lbl.textSize = 12f
+        lbl.setTextColor(Color.parseColor("#8B92A1"))
         val sp = Spinner(this)
         sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
             arrayOf("Abrir na conta da aba", "Sessão compartilhada do app", "Abrir pelo Chrome"))
         sp.setSelection(if (i >= 0) favs[i].mode else 0)
-        box.addView(n); box.addView(u); box.addView(sp)
-        AlertDialog.Builder(this).setTitle(if (i >= 0) "Editar favorito" else "Novo favorito").setView(box)
+        box.addView(nTil); box.addView(uTil); box.addView(lbl); box.addView(sp)
+        MaterialAlertDialogBuilder(this).setTitle(if (i >= 0) "Editar favorito" else "Novo favorito").setView(box)
             .setPositiveButton("Salvar") { _, _ ->
                 var url = u.text.toString().trim()
                 if (url.isEmpty()) return@setPositiveButton
@@ -844,10 +993,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun favOptions(i: Int) {
         if (i < 0 || i >= favs.size) return
-        AlertDialog.Builder(this).setTitle(favs[i].name)
-            .setItems(arrayOf("Editar", "Remover")) { _, w ->
-                if (w == 0) editFav(i) else { favs.removeAt(i); saveFavs(); favAdapter.notifyDataSetChanged() }
-            }.show()
+        val f = favs[i]
+        val sh = Sheet(this).title(f.name, f.url)
+        sh.row(R.drawable.ic_edit, "Editar") { editFav(i) }
+        sh.row(R.drawable.ic_delete, "Remover", danger = true) {
+            favs.remove(f); saveFavs(); favAdapter.notifyDataSetChanged()
+        }
+        sh.show()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -855,7 +1007,7 @@ class MainActivity : AppCompatActivity() {
         closeFav()
         if (f.mode == 2) {
             try { androidx.browser.customtabs.CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(f.url)) }
-            catch (e: Exception) { Toast.makeText(this, "Não foi possível abrir pelo Chrome", Toast.LENGTH_SHORT).show() }
+            catch (e: Exception) { say("Não foi possível abrir pelo Chrome") }
             return
         }
         val w = WebView(this)
@@ -908,17 +1060,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class FavAdapter : RecyclerView.Adapter<FavAdapter.VH>() {
-        inner class VH(val t: TextView) : RecyclerView.ViewHolder(t)
-        override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_tab, p, false) as TextView)
+        inner class VH(val v: View) : RecyclerView.ViewHolder(v) {
+            val av: TextView = v.findViewById(R.id.favAvatar)
+            val nm: TextView = v.findViewById(R.id.favName)
+        }
+        override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_tab, p, false))
         override fun getItemCount() = favs.size
         override fun onBindViewHolder(h: VH, i: Int) {
-            h.t.text = favs[i].name + (if (favs[i].mode == 2) " ↗" else "")
-            h.t.setTextColor(Color.parseColor("#E6E9F0"))
-            h.t.setOnClickListener { val p = h.bindingAdapterPosition; if (p >= 0) openFav(favs[p]) }
-            h.t.setOnLongClickListener { favOptions(h.bindingAdapterPosition); true }
+            val f = favs[i]
+            h.nm.text = f.name + (if (f.mode == 2) " ↗" else "")
+            Ui.avatar(h.av, f.name)
+            h.v.setOnClickListener { val p = h.bindingAdapterPosition; if (p >= 0) openFav(favs[p]) }
+            h.v.setOnLongClickListener { favOptions(h.bindingAdapterPosition); true }
         }
     }
-
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() { tickNow(); handler.postDelayed(this, 1000) }
@@ -972,6 +1127,7 @@ class MainActivity : AppCompatActivity() {
 
     inner class TabAdapter : RecyclerView.Adapter<TabAdapter.VH>() {
         inner class VH(val v: View) : RecyclerView.ViewHolder(v) {
+            val av: TextView = v.findViewById(R.id.tabAvatar)
             val name: TextView = v.findViewById(R.id.tabName)
             val st: TextView = v.findViewById(R.id.tabStatus)
             fun bindStatus(t: Tab) {
@@ -986,6 +1142,7 @@ class MainActivity : AppCompatActivity() {
         override fun getItemCount() = tabs.size
         override fun onBindViewHolder(h: VH, i: Int) {
             h.name.text = tabs[i].name
+            Ui.avatar(h.av, tabs[i].name)
             h.v.isSelected = i == cur
             h.name.setTextColor(if (i == cur) Color.WHITE else Color.parseColor("#B0B6C3"))
             h.bindStatus(tabs[i])

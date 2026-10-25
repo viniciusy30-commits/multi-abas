@@ -2,28 +2,56 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="match_parent"
     android:orientation="vertical" android:background="@color/bg">
-    <LinearLayout android:layout_width="match_parent" android:layout_height="52dp"
-        android:gravity="center_vertical" android:paddingStart="8dp" android:orientation="horizontal">
-        <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvTabs"
-            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" />
-        <ImageButton android:id="@+id/btnAdd" android:layout_width="44dp" android:layout_height="44dp"
-            android:src="@drawable/ic_add" android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Nova aba" />
-    </LinearLayout>
+
+    <!-- Cabeçalho: abas + endereço -->
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:gravity="center_vertical" android:paddingHorizontal="8dp" android:paddingBottom="6dp"
-        android:orientation="horizontal">
-        <EditText android:id="@+id/urlBar" android:layout_width="0dp" android:layout_height="42dp"
-            android:layout_weight="1" android:background="@drawable/bg_url" android:paddingHorizontal="16dp"
-            android:singleLine="true" android:inputType="textUri" android:imeOptions="actionGo"
-            android:textColor="#FFFFFF" android:textSize="14sp" android:selectAllOnFocus="true" />
-        <ImageButton android:id="@+id/btnMenu" android:layout_width="44dp" android:layout_height="44dp"
-            android:src="@drawable/ic_more" android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="Menu" />
+        android:orientation="vertical" android:paddingTop="4dp" android:paddingBottom="8dp">
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="52dp"
+            android:gravity="center_vertical" android:orientation="horizontal"
+            android:paddingStart="10dp" android:paddingEnd="10dp">
+            <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvTabs"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:clipToPadding="false" />
+            <ImageButton android:id="@+id/btnAdd" android:layout_width="40dp" android:layout_height="40dp"
+                android:layout_marginStart="4dp" android:padding="10dp"
+                android:src="@drawable/ic_add" android:tint="@color/on_accent"
+                android:background="@drawable/bg_circle_accent"
+                android:contentDescription="Nova aba" />
+        </LinearLayout>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" android:gravity="center_vertical"
+            android:orientation="horizontal" android:paddingStart="10dp" android:paddingEnd="10dp">
+            <LinearLayout android:layout_width="0dp" android:layout_height="44dp"
+                android:layout_weight="1" android:gravity="center_vertical"
+                android:orientation="horizontal" android:background="@drawable/bg_url"
+                android:paddingStart="14dp" android:paddingEnd="2dp">
+                <ImageView android:id="@+id/urlIcon" android:layout_width="15dp" android:layout_height="15dp"
+                    android:src="@drawable/ic_lock" android:tint="@color/muted" />
+                <EditText android:id="@+id/urlBar" android:layout_width="0dp" android:layout_height="match_parent"
+                    android:layout_weight="1" android:background="@null"
+                    android:paddingStart="10dp" android:paddingEnd="6dp"
+                    android:singleLine="true" android:inputType="textUri" android:imeOptions="actionGo"
+                    android:hint="Pesquisar ou digitar endereço" android:textColorHint="@color/muted"
+                    android:textColor="@color/text" android:textSize="14sp" />
+                <ImageButton android:id="@+id/btnReload" android:layout_width="40dp" android:layout_height="40dp"
+                    android:padding="10dp" android:src="@drawable/ic_refresh" android:tint="@color/muted"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Recarregar" />
+            </LinearLayout>
+            <ImageButton android:id="@+id/btnMenu" android:layout_width="44dp" android:layout_height="44dp"
+                android:layout_marginStart="8dp" android:padding="10dp"
+                android:src="@drawable/ic_more" android:tint="@color/text"
+                android:background="@drawable/bg_circle_btn"
+                android:contentDescription="Menu" />
+        </LinearLayout>
     </LinearLayout>
+
     <ProgressBar android:id="@+id/progress" style="?android:attr/progressBarStyleHorizontal"
-        android:layout_width="match_parent" android:layout_height="3dp" android:visibility="gone"
-        android:progressTint="@color/accent" />
+        android:layout_width="match_parent" android:layout_height="2dp" android:visibility="gone"
+        android:progressTint="@color/accent" android:progressBackgroundTint="@color/outline" />
+
     <FrameLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
         <FrameLayout android:id="@+id/container" android:layout_width="match_parent"
             android:layout_height="match_parent" />
@@ -31,32 +59,43 @@
             android:layout_height="match_parent" android:orientation="vertical"
             android:background="@color/bg" android:clickable="true" android:focusable="true"
             android:visibility="gone">
-            <LinearLayout android:layout_width="match_parent" android:layout_height="44dp"
+            <LinearLayout android:layout_width="match_parent" android:layout_height="48dp"
                 android:gravity="center_vertical" android:paddingStart="16dp"
                 android:background="@color/surface" android:orientation="horizontal">
+                <ImageView android:layout_width="16dp" android:layout_height="16dp"
+                    android:src="@drawable/ic_star" android:tint="@color/accent" />
                 <TextView android:id="@+id/favTitle" android:layout_width="0dp"
                     android:layout_height="wrap_content" android:layout_weight="1"
+                    android:layout_marginStart="10dp"
                     android:maxLines="1" android:ellipsize="end"
-                    android:textColor="#FFFFFF" android:textSize="14sp" />
-                <ImageButton android:id="@+id/btnFavClose" android:layout_width="44dp"
-                    android:layout_height="44dp" android:src="@drawable/ic_close"
+                    android:textColor="@color/text" android:textSize="15sp" android:textStyle="bold" />
+                <ImageButton android:id="@+id/btnFavClose" android:layout_width="48dp"
+                    android:layout_height="48dp" android:padding="13dp" android:src="@drawable/ic_close"
+                    android:tint="@color/muted"
                     android:background="?attr/selectableItemBackgroundBorderless"
                     android:contentDescription="Fechar" />
             </LinearLayout>
             <ProgressBar android:id="@+id/favProgress" style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="match_parent" android:layout_height="3dp"
+                android:layout_width="match_parent" android:layout_height="2dp"
                 android:visibility="gone" android:progressTint="@color/accent" />
             <FrameLayout android:id="@+id/favHost" android:layout_width="match_parent"
                 android:layout_height="0dp" android:layout_weight="1" />
         </LinearLayout>
     </FrameLayout>
-    <LinearLayout android:layout_width="match_parent" android:layout_height="52dp"
-        android:gravity="center_vertical" android:paddingStart="8dp"
-        android:background="@color/surface" android:orientation="horizontal">
+
+    <!-- Dock de favoritos -->
+    <LinearLayout android:id="@+id/dock" android:layout_width="match_parent"
+        android:layout_height="60dp" android:gravity="center_vertical"
+        android:paddingStart="16dp" android:paddingEnd="6dp"
+        android:background="@drawable/bg_dock" android:orientation="horizontal">
+        <ImageView android:layout_width="16dp" android:layout_height="16dp"
+            android:src="@drawable/ic_star" android:tint="@color/accent" />
         <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvFavs"
-            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" />
+            android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+            android:layout_marginStart="10dp" />
         <ImageButton android:id="@+id/btnFavAdd" android:layout_width="44dp" android:layout_height="44dp"
-            android:src="@drawable/ic_add" android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="11dp" android:src="@drawable/ic_add" android:tint="@color/muted"
+            android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Novo favorito" />
     </LinearLayout>
 </LinearLayout>

@@ -7,7 +7,7 @@ import android.os.Build
 import android.provider.Settings
 import android.widget.ProgressBar
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
@@ -51,7 +51,7 @@ object Updater {
     }
 
     private fun ask(a: Activity, v: Int, url: String) {
-        AlertDialog.Builder(a).setTitle("Nova versão disponível")
+        MaterialAlertDialogBuilder(a).setTitle("Nova versão disponível")
             .setMessage("Versão 1.$v pronta para instalar.")
             .setPositiveButton("Atualizar") { _, _ -> download(a, url) }
             .setNegativeButton("Depois", null).show()
@@ -60,7 +60,7 @@ object Updater {
     private fun download(a: Activity, url: String) {
         val pb = ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal)
         pb.max = 100; pb.setPadding(48, 32, 48, 16)
-        val d = AlertDialog.Builder(a).setTitle("Baixando atualização…").setView(pb).setCancelable(false).show()
+        val d = MaterialAlertDialogBuilder(a).setTitle("Baixando atualização…").setView(pb).setCancelable(false).show()
         Thread {
             try {
                 val dir = File(a.cacheDir, "updates").apply { mkdirs() }
@@ -87,7 +87,7 @@ object Updater {
 
     private fun install(a: Activity, f: File) {
         if (Build.VERSION.SDK_INT >= 26 && !a.packageManager.canRequestPackageInstalls()) {
-            AlertDialog.Builder(a).setTitle("Permitir instalação")
+            MaterialAlertDialogBuilder(a).setTitle("Permitir instalação")
                 .setMessage("Para atualizar, libere \"Instalar apps desconhecidos\" para o Multi Abas. Depois volte e toque em Verificar atualização.")
                 .setPositiveButton("Abrir configuração") { _, _ ->
                     a.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + a.packageName)))
