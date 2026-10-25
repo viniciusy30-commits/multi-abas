@@ -38,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rv: RecyclerView
     private val adapter = TabAdapter()
     private var fileCb: ValueCallback<Array<Uri>>? = null
+    /** ZIP do main pronto para injetar no próximo file chooser do Claude */
+    private var pendingClaudeFile: Array<Uri>? = null
     private val profilesOk by lazy { WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) }
     private val prefs by lazy { getSharedPreferences("tabs", 0) }
     private class Fav(var name: String, var url: String, var mode: Int = 0)
@@ -49,9 +51,73 @@ class MainActivity : AppCompatActivity() {
     private lateinit var favTitle: TextView
     private lateinit var favProgress: ProgressBar
 
-    private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+    // Galeria do sistema (estilo Google Fotos) — Android 13+ Photo Picker / PickVisualMedia
+    private val photoPicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) fileCb?.onReceiveValue(arrayOf(uri)) else fileCb?.onReceiveValue(null)
+        fileCb = null
+    }
+    private val multiPhotoPicker = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { uris ->
+        if (uris.isNotEmpty()) fileCb?.onReceiveValue(uris.toTypedArray()) else fileCb?.onReceiveValue(null)
+        fileCb = null
+    }
+    // Fallback: documentos / qualquer arquivo
+    private val docPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         fileCb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(r.resultCode, r.data))
         fileCb = null
+    }
+
+    private fun openFileChooser(params: WebChromeClient.FileChooserParams): Boolean {
+        // Se estamos enviando o main do repo pro Claude, entrega o ZIP direto
+        val pending = pendingClaudeFile
+        if (pending != null) {
+            pendingClaudeFile = null
+            try {
+                fileCb?.onReceiveValue(pending)
+            } catch (_: Exception) {
+                fileCb?.onReceiveValue(null)
+            }
+            fileCb = null
+            return true
+        }
+        return try {
+            val types = params.acceptTypes?.filter { it.isNotBlank() } ?: emptyList()
+            val joined = types.joinToString(",").lowercase()
+            val wantsImage = types.isEmpty() || joined.contains("image") || joined.contains("*/*")
+            val wantsVideo = joined.contains("video")
+            val onlyMedia = types.isEmpty() || types.all { t ->
+                val x = t.lowercase()
+                x.startsWith("image") || x.startsWith("video") || x == "*/*" || x == "." || x.isBlank()
+            }
+            // Claude costuma pedir image/* ou deixar vazio para anexos de mídia
+            if (onlyMedia && (wantsImage || wantsVideo)) {
+                val multi = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+                val mediaType = when {
+                    wantsImage && wantsVideo -> androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo
+                    wantsVideo && !wantsImage -> androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.VideoOnly
+                    else -> androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
+                }
+                val req = androidx.activity.result.PickVisualMediaRequest.Builder()
+                    .setMediaType(mediaType)
+                    .build()
+                if (multi) multiPhotoPicker.launch(req) else photoPicker.launch(req)
+                true
+            } else {
+                // Outros tipos: seletor de documentos
+                val intent = params.createIntent()
+                // Preferir GET_CONTENT que abre melhor no Android
+                if (intent.action.isNullOrBlank()) intent.action = Intent.ACTION_GET_CONTENT
+                docPicker.launch(intent)
+                true
+            }
+        } catch (e: Exception) {
+            try {
+                docPicker.launch(params.createIntent())
+                true
+            } catch (_: Exception) {
+                fileCb = null
+                false
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -154,7 +220,7 @@ class MainActivity : AppCompatActivity() {
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                 fileCb?.onReceiveValue(null)
                 fileCb = cb
-                return try { picker.launch(p.createIntent()); true } catch (e: Exception) { fileCb = null; false }
+                return openFileChooser(p)
             }
         }
         setupDownload(w)
@@ -330,12 +396,14 @@ class MainActivity : AppCompatActivity() {
         m.menu.add(0, 10, 0, projLabel)
         m.menu.add(0, 11, 1, "Gerenciar projetos")
         m.menu.add(0, 12, 2, "Abrir jogo")
-        m.menu.add(0, 1, 3, "Recarregar")
-        m.menu.add(0, 2, 4, "Configurações")
+        m.menu.add(0, 13, 3, "Enviar main pro Claude")
+        m.menu.add(0, 1, 4, "Recarregar")
+        m.menu.add(0, 2, 5, "Configurações")
         m.setOnMenuItemClickListener {
             when (it.itemId) {
                 10, 11 -> projectPicker()
                 12 -> openCurrentGame()
+                13 -> sendMainToClaude()
                 1 -> webs[tabs[cur].id]?.reload()
                 2 -> settings()
             }
@@ -438,11 +506,114 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (p.packageName.isBlank()) {
-            Toast.makeText(this, "Cadastre o package do jogo no projeto (ex: com.xxx.jogo)", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Package do jogo não detectado. Edite o projeto e preencha.", Toast.LENGTH_LONG).show()
             return
         }
         if (!GitHubDelivery.openGame(this, p)) {
-            Toast.makeText(this, "Jogo não instalado. Depois do build, instale pelo aviso.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Jogo não instalado. Use Baixar APK mais recente.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * Baixa o ZIP do branch do projeto (main/padrão) e anexa no chat do Claude aberto.
+     */
+    private fun sendMainToClaude() {
+        val p = Projects.current(this)
+        if (p == null) {
+            Toast.makeText(this, "Defina um Projeto atual primeiro", Toast.LENGTH_SHORT).show()
+            projectPicker()
+            return
+        }
+        val token = Projects.token(this)
+        // token ajuda em repo privado; público funciona sem
+        Toast.makeText(this, "Baixando main de ${p.name}…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val branch = p.branch.ifBlank { "main" }
+                val zip = GitHubDelivery.downloadRepoZip(this, token, p, branch)
+                if (zip == null || !zip.exists()) {
+                    runOnUiThread {
+                        Toast.makeText(this, "Não foi possível baixar o ZIP de ${p.fullRepo()}@$branch", Toast.LENGTH_LONG).show()
+                    }
+                    return@Thread
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    this, packageName + ".fileprovider", zip
+                )
+                runOnUiThread {
+                    pendingClaudeFile = arrayOf(uri)
+                    Toast.makeText(this, "Anexando ${zip.name} no Claude…", Toast.LENGTH_SHORT).show()
+                    triggerClaudeAttach()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Erro: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    /** Clica no botão de anexar / input file da página do Claude. */
+    private fun triggerClaudeAttach() {
+        val w = webs[tabs.getOrNull(cur)?.id] ?: run {
+            Toast.makeText(this, "Nenhuma aba aberta", Toast.LENGTH_SHORT).show()
+            pendingClaudeFile = null
+            return
+        }
+        val js = """
+            (function(){
+              function click(el){ if(!el) return false; el.click(); return true; }
+              var input = document.querySelector('input[type=file]');
+              if (input) { input.click(); return 'input'; }
+              var sels = [
+                'button[aria-label*="attach" i]',
+                'button[aria-label*="Upload" i]',
+                'button[aria-label*="Add files" i]',
+                'button[aria-label*="Anexar" i]',
+                'button[data-testid*="file" i]',
+                'button[data-testid*="attach" i]',
+                '[data-testid="input-menu"] button',
+                'button[aria-label*="plus" i]'
+              ];
+              for (var i=0;i<sels.length;i++){
+                var b = document.querySelector(sels[i]);
+                if (click(b)) return 'btn:'+sels[i];
+              }
+              // botões com ícone de clipe / + perto do composer
+              var all = document.querySelectorAll('button');
+              for (var j=0;j<all.length;j++){
+                var a = (all[j].getAttribute('aria-label')||'') + ' ' + (all[j].getAttribute('data-testid')||'');
+                if (/attach|upload|file|paperclip|plus|anexar|arquivo/i.test(a)) {
+                  all[j].click(); return 'scan:'+a;
+                }
+              }
+              return 'none';
+            })();
+        """.trimIndent()
+        w.evaluateJavascript(js) { result ->
+            val r = result?.trim('"') ?: "null"
+            if (r == "none" || r == "null") {
+                // tenta de novo após um instante (UI pode estar hidratando)
+                w.postDelayed({
+                    w.evaluateJavascript(js) { r2 ->
+                        val x = r2?.trim('"') ?: "null"
+                        if (x == "none" || x == "null") {
+                            Toast.makeText(
+                                this,
+                                "Não achei o botão de anexar. Abra o Claude, foque no chat e tente de novo.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            // limpa pendência se o chooser não abrir em 8s
+                            w.postDelayed({
+                                if (pendingClaudeFile != null) {
+                                    pendingClaudeFile = null
+                                    Toast.makeText(this, "Envio cancelado (chooser não abriu)", Toast.LENGTH_SHORT).show()
+                                }
+                            }, 8000)
+                        }
+                    }
+                }, 600)
+            }
         }
     }
 
@@ -714,7 +885,7 @@ class MainActivity : AppCompatActivity() {
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                 fileCb?.onReceiveValue(null)
                 fileCb = cb
-                return try { picker.launch(p.createIntent()); true } catch (e: Exception) { fileCb = null; false }
+                return openFileChooser(p)
             }
         }
         setupDownload(w)

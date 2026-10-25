@@ -1,3 +1,13 @@
+#id 2026-10-24-e
+#titulo Main do repo pro Claude
+- Menu: Enviar main pro Claude — baixa o ZIP do branch do projeto e anexa no chat aberto
+- Galeria do sistema para fotos/vídeos (não o gerenciador de arquivos)
+
+#id 2026-10-24-d
+#titulo Galeria e APK do projeto
+- Anexar foto/vídeo no Claude abre a galeria do sistema (não o gerenciador de arquivos)
+- Menu: Baixar APK mais recente do projeto atual
+
 #id 2026-10-24-c
 #titulo Projetos pelo GitHub
 - Ao adicionar projeto, escolhe o repositório na lista da sua conta

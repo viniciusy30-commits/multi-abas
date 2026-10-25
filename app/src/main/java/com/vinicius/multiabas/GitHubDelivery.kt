@@ -145,6 +145,53 @@ object GitHubDelivery {
         }
     }
 
+    /**
+     * Baixa o ZIP do código-fonte (branch) do repositório.
+     * Usa a API zipball (funciona em repo privado com token).
+     */
+    fun downloadRepoZip(ctx: Context, token: String, p: Project, branch: String): File? {
+        return try {
+            val ref = branch.ifBlank { "main" }
+            val url = URL("$API/repos/${p.fullRepo()}/zipball/$ref")
+            val c = url.openConnection() as HttpURLConnection
+            c.instanceFollowRedirects = true
+            c.connectTimeout = 30000
+            c.readTimeout = 180000
+            c.setRequestProperty("Accept", "application/vnd.github+json")
+            c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            if (token.isNotBlank()) c.setRequestProperty("Authorization", "Bearer $token")
+            // seguir redirects manualmente se precisar (GitHub devolve 302)
+            var conn = c
+            var code = conn.responseCode
+            var hops = 0
+            while (code in 300..399 && hops < 5) {
+                val loc = conn.getHeaderField("Location") ?: break
+                conn.disconnect()
+                conn = URL(loc).openConnection() as HttpURLConnection
+                conn.instanceFollowRedirects = true
+                conn.connectTimeout = 30000
+                conn.readTimeout = 180000
+                if (token.isNotBlank()) conn.setRequestProperty("Authorization", "Bearer $token")
+                code = conn.responseCode
+                hops++
+            }
+            if (code !in 200..299) return null
+            val dir = File(ctx.cacheDir, "repo_zips").apply { mkdirs() }
+            dir.listFiles()?.forEach { it.delete() }
+            val out = File(dir, "${p.repo}-$ref.zip")
+            conn.inputStream.use { input ->
+                out.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (out.length() < 100) {
+                out.delete()
+                return null
+            }
+            out
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun installApk(ctx: Context, apk: File) {
         val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", apk)
         val i = Intent(Intent.ACTION_VIEW)
