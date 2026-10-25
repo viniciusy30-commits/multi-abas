@@ -47,6 +47,7 @@ class MainActivity : AppCompatActivity() {
     private val favs = mutableListOf<Fav>()
     private val favAdapter = FavAdapter()
     private var favWeb: WebView? = null
+    private val limitAsked = HashSet<String>()
     private lateinit var overlay: View
     private lateinit var favHost: FrameLayout
     private lateinit var favTitle: TextView
@@ -200,6 +201,7 @@ class MainActivity : AppCompatActivity() {
         select(cur)
         Updater.autoCheck(this)
         Novidades.show(this, false)
+        handler.postDelayed(handoffTick, 8000)
         if (prefs.getBoolean("keepalive", true)) {
             maybeRequestNotifPermission()
             KeepAliveService.start(this)
@@ -490,6 +492,7 @@ class MainActivity : AppCompatActivity() {
             input("Renomear aba", t.name) { t.name = it; adapter.notifyDataSetChanged(); save() }
         }
         sh.row(R.drawable.ic_refresh, "Recarregar") { webs[t.id]?.reload() }
+        sh.row(R.drawable.ic_send, "Continuar em outra conta", "Leva o projeto e a conversa desta aba") { chooseTarget(t) }
         sh.row(R.drawable.ic_timer, "Definir volta do limite", "Mostra um cronômetro na aba") {
             val idx = tabs.indexOf(t)
             if (idx >= 0) pickLimit(idx)
@@ -534,6 +537,8 @@ class MainActivity : AppCompatActivity() {
             Tile(R.drawable.ic_folder, "Projetos") { projectPicker() },
             Tile(R.drawable.ic_settings, "Ajustes") { settings() }
         ))
+        sh.section("Limite acabou?")
+        sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Leva o projeto e a conversa para outra aba") { manualHandoff() }
         sh.show()
     }
 
@@ -551,6 +556,10 @@ class MainActivity : AppCompatActivity() {
             R.drawable.ic_bolt, "Segundo plano", "Mantém o Claude rodando ao minimizar",
             prefs.getBoolean("keepalive", true)
         ) { on -> setKeepAlive(on) }
+        sh.switchRow(
+            R.drawable.ic_code, "Salvar andamento do Claude", "Guarda a conversa em tempo real para continuar em outra conta",
+            prefs.getBoolean("handoff_auto", true)
+        ) { on -> prefs.edit().putBoolean("handoff_auto", on).apply(); say(if (on) "Andamento sendo salvo" else "Andamento pausado") }
         sh.row(R.drawable.ic_download, "Verificar atualização", "Procura uma versão nova do app") { Updater.check(this, true) }
         sh.row(R.drawable.ic_info, "O que mudou", "Novidades desta versão") { Novidades.show(this, true) }
         sh.show()
@@ -644,11 +653,15 @@ class MainActivity : AppCompatActivity() {
         val popup = BuildPopup(this, proj.name)
         popup.show()
         popup.status("Enviando $zipName → ${proj.name}…")
+        Handoff.log(this, proj.id, "ZIP enviado: $zipName")
         GitHubDelivery.deliver(
             this, proj, zipName, bytes,
             onStatus = { popup.status(it) },
             onSteps = { popup.steps(it) },
-            onDone = { ok, url, apk -> popup.done(ok, url, apk) }
+            onDone = { ok, url, apk ->
+                Handoff.log(this, proj.id, "$zipName → " + if (ok) "build OK, APK pronto" else "build falhou ou sem APK")
+                popup.done(ok, url, apk)
+            }
         )
     }
 
@@ -764,6 +777,131 @@ class MainActivity : AppCompatActivity() {
                     }
                 }, 600)
             }
+        }
+    }
+
+    // ───────────── Continuar em outra conta ─────────────
+
+    private val handoffTick = object : Runnable {
+        override fun run() {
+            try { captureAll() } catch (_: Exception) { }
+            handler.postDelayed(this, 15000)
+        }
+    }
+
+    /** A cada 15s guarda a conversa de cada aba do Claude e avisa se algum limite foi atingido. */
+    private fun captureAll() {
+        if (!prefs.getBoolean("handoff_auto", true)) return
+        for (t in tabs.toList()) {
+            val w = webs[t.id] ?: continue
+            val u = w.url ?: continue
+            if (!u.contains("claude.ai")) continue
+            w.evaluateJavascript(Handoff.CAPTURE_JS) { raw ->
+                val snap = Handoff.parse(raw)
+                if (snap != null) {
+                    Handoff.save(this, t.id, snap)
+                    if (snap.limit) {
+                        if (limitAsked.add(t.id)) offerHandoff(t)
+                    } else limitAsked.remove(t.id)
+                }
+            }
+        }
+    }
+
+    private fun offerHandoff(t: Tab) {
+        if (isFinishing || isDestroyed) return
+        if (tabs.size < 2) {
+            say("\"${t.name}\" parece ter batido o limite. Adicione outra aba (conta) para continuar.", true)
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Limite atingido?")
+            .setMessage("A conta \"${t.name}\" parece ter chegado ao limite. Quer continuar o projeto em outra conta? O app leva a conversa e o código atual.")
+            .setPositiveButton("Continuar") { _, _ -> chooseTarget(t) }
+            .setNegativeButton("Agora não", null)
+            .show()
+    }
+
+    private fun manualHandoff() {
+        val t = tabs.getOrNull(cur) ?: return
+        chooseTarget(t)
+    }
+
+    /** Escolhe para qual aba (conta) levar o projeto. */
+    private fun chooseTarget(from: Tab) {
+        val others = tabs.filter { it.id != from.id }
+        if (others.isEmpty()) {
+            say("Só existe uma aba. Toque em + para adicionar outra conta.", true)
+            return
+        }
+        if (!Handoff.hasChat(this, from.id) && Projects.current(this) == null) {
+            say("Ainda não tenho a conversa de \"${from.name}\" salva. Abra um chat do Claude nela e espere uns 15s.", true)
+            return
+        }
+        val now = System.currentTimeMillis()
+        val labels = others.map {
+            it.name + if (it.until > now) "  ·  limite até " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(it.until)) else "  ·  liberada"
+        }.toTypedArray()
+        val info = Handoff.chatInfo(this, from.id)
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Continuar em qual conta?")
+            .setMessage(if (info != null) "Conversa salva: $info" else "Sem conversa salva — vai só o código do projeto.")
+            .setItems(labels) { _, which -> startHandoff(from, others[which]) }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun startHandoff(from: Tab, to: Tab) {
+        val proj = Projects.current(this)
+        val token = Projects.token(this)
+        val popup = BuildPopup(this, proj?.name ?: from.name, "Continuar em ${to.name}")
+        popup.show()
+        popup.status("Montando o pacote…")
+        Thread {
+            val f = try {
+                Handoff.build(this, from.name, from.id, proj, token) { popup.status(it) }
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (f == null) {
+                    popup.status("Não consegui montar o pacote (sem conversa e sem projeto).")
+                    popup.done(false, null, null)
+                    return@runOnUiThread
+                }
+                try { saveBytes(f.readBytes(), f.name, "application/zip") } catch (_: Exception) { }
+                popup.status("Pronto ✓ Abrindo \"${to.name}\" e anexando…")
+                popup.done(true, null, null)
+                openInTarget(to, f)
+            }
+        }.start()
+    }
+
+    /** Abre um chat novo na aba de destino, escreve a mensagem inicial e abre o anexar com o ZIP. */
+    private fun openInTarget(to: Tab, f: java.io.File) {
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f)
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("continuar", Handoff.STARTER))
+            val idx = tabs.indexOf(to)
+            if (idx < 0) return
+            select(idx)
+            val w = webs[to.id] ?: return
+            w.loadUrl("https://claude.ai/new")
+            val fill = "(function(){var e=document.querySelector('div[contenteditable=\"true\"]');" +
+                "if(!e)return 'none';e.focus();document.execCommand('insertText',false," +
+                JSONObject.quote(Handoff.STARTER) + ");return 'ok';})();"
+            w.postDelayed({
+                w.evaluateJavascript(fill) { r ->
+                    pendingClaudeFile = arrayOf(uri)
+                    w.postDelayed({ triggerClaudeAttach() }, 600)
+                    if (r?.contains("ok") != true) {
+                        say("Entre na conta \"${to.name}\", cole a mensagem (já copiada) e anexe o ZIP de Downloads.", true)
+                    } else {
+                        say("Mensagem pronta. Se o anexo não abrir sozinho, use o ZIP em Downloads.", true)
+                    }
+                }
+            }, 4500)
+        } catch (e: Exception) {
+            say("ZIP salvo em Downloads. Anexe na outra conta: ${e.message}", true)
         }
     }
 
@@ -1092,6 +1230,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(handoffTick)
         // Se o usuário fechou de verdade (não só girou a tela), para o serviço
         if (isFinishing) KeepAliveService.stop(this)
         super.onDestroy()

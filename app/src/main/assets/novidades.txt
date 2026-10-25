@@ -1,3 +1,11 @@
+#id 2026-10-25-c
+#titulo Continuar em outra conta
+- O app guarda a conversa do Claude em tempo real (a cada ~15s), uma por aba
+- Quando aparecer o aviso de limite, ele oferece continuar em outra conta
+- Menu → Continuar em outra conta (ou segure a aba): monta um ZIP com a conversa, o log de entregas e o código atual do projeto
+- Abre um chat novo na outra conta, já com a mensagem pronta e o ZIP anexado
+- Ajustes: interruptor "Salvar andamento do Claude"
+
 #id 2026-10-25-b
 #titulo Visual novo + tudo mais fácil
 - Interface redesenhada: abas com avatar colorido, endereço em pílula e dock de favoritos

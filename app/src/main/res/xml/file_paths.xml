@@ -3,4 +3,5 @@
     <cache-path name="updates" path="updates/" />
     <cache-path name="game_apks" path="game_apks/" />
     <cache-path name="repo_zips" path="repo_zips/" />
+    <cache-path name="handoff_out" path="handoff_out/" />
 </paths>
