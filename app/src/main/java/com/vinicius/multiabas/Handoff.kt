@@ -145,13 +145,101 @@ var t=ed.closest('fieldset,form')||ed.parentElement||ed;
 ['dragenter','dragover','drop'].forEach(function(n){t.dispatchEvent(new DragEvent(n,{bubbles:true,cancelable:true,dataTransfer:dt}));});
 return 'drop';}catch(e){return 'err:'+e.message;}})('__MODE__');"""
 
+    /** Salva o chat inteiro: abre todos os blocos, guarda texto, HTML, imagens, links e arquivos. */
+    const val FULL_JS = """(function(tok){
+var A=window.AndroidDl;
+if(!A||!A.hfEnd){return 'nobridge';}
+function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+function nodesOf(){
+ var sel='[data-testid="user-message"], .font-claude-response, .font-claude-message, [data-is-streaming]';
+ var all=document.querySelectorAll(sel),out=[];
+ all.forEach(function(n){for(var i=0;i<out.length;i++){if(out[i].contains(n))return;}out.push(n);});
+ return out;
+}
+function extOf(m){m=(m||'').toLowerCase();
+ if(m.indexOf('png')>=0)return 'png';if(m.indexOf('jpeg')>=0||m.indexOf('jpg')>=0)return 'jpg';
+ if(m.indexOf('webp')>=0)return 'webp';if(m.indexOf('gif')>=0)return 'gif';if(m.indexOf('svg')>=0)return 'svg';
+ if(m.indexOf('pdf')>=0)return 'pdf';if(m.indexOf('zip')>=0)return 'zip';if(m.indexOf('json')>=0)return 'json';
+ if(m.indexOf('text')>=0)return 'txt';return 'bin';}
+var total=0,LIMIT=20*1024*1024;
+function readAs(blob){return new Promise(function(res){var fr=new FileReader();fr.onloadend=function(){res(fr.result);};fr.onerror=function(){res(null);};fr.readAsDataURL(blob);});}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+async function grab(src,folder,base,fname){
+ try{
+  var blob;
+  if(src.indexOf('data:')===0){var r0=await fetch(src);blob=await r0.blob();}
+  else{var r=await fetch(src,{credentials:'include'});if(!r.ok)return null;blob=await r.blob();}
+  if((blob.type||'').indexOf('text/html')===0)return null;
+  if(blob.size<200||blob.size>12*1024*1024||total+blob.size>LIMIT)return null;
+  var name=fname||(base+'.'+extOf(blob.type));
+  var du=await readAs(blob);if(!du)return null;
+  total+=blob.size;
+  A.hfBin(tok,folder+'/'+name,blob.type||'',du);
+  return folder+'/'+name;
+ }catch(e){return null;}
+}
+(async function(){
+ var sum={msgs:0,imgs:0,files:0,chars:0,err:''};
+ try{
+  A.hfProgress(tok,'Abrindo todos os blocos recolhidos…');
+  for(var round=0;round<4;round++){
+   var opened=0;
+   nodesOf().forEach(function(m){m.querySelectorAll('button[aria-expanded="false"]').forEach(function(b){try{b.click();opened++;}catch(e){}});});
+   if(!opened)break;
+   await sleep(900);
+  }
+  var nodes=nodesOf(),parts=[],html=[],links=[],last='';
+  for(var i=0;i<nodes.length;i++){
+   var n=nodes[i],isU=n.matches('[data-testid="user-message"]');
+   var t=(n.innerText||'').trim();
+   if(!t&&!n.querySelector('img'))continue;
+   parts.push((isU?'### VOCÊ':'### CLAUDE')+'\n'+t);
+   if(!isU&&t)last=t;
+   var c=n.cloneNode(true);
+   c.querySelectorAll('script,style,iframe,video,audio').forEach(function(x){x.remove();});
+   var oi=n.querySelectorAll('img'),ci=c.querySelectorAll('img');
+   for(var j=0;j<oi.length&&j<ci.length;j++){
+    var src=oi[j].currentSrc||oi[j].src||'';
+    if(!src)continue;
+    var w=oi[j].naturalWidth||0;
+    if((w&&w<48)||/avatar|favicon|emoji/i.test(src)){ci[j].remove();continue;}
+    A.hfProgress(tok,'Salvando imagem '+(sum.imgs+1)+'…');
+    var loc=await grab(src,'imagens','img_'+(sum.imgs+1));
+    if(loc){sum.imgs++;ci[j].setAttribute('src',loc);ci[j].removeAttribute('srcset');}
+   }
+   n.querySelectorAll('a[href]').forEach(function(a){var h=a.href;if(h&&h.indexOf('javascript')!==0)links.push({t:(a.innerText||'').trim().slice(0,80),h:h,d:a.getAttribute('download')||''});});
+   html.push('<div class="'+(isU?'u':'c')+'"><b>'+(isU?'VOCÊ':'CLAUDE')+'</b>'+c.innerHTML+'</div>');
+  }
+  var seen={},lt=[];
+  for(var k=0;k<links.length;k++){var L=links[k];if(seen[L.h])continue;seen[L.h]=1;lt.push((L.t||'(sem texto)')+' -> '+L.h);}
+  var dl=links.filter(function(L){return L.d||/\/(download|files?|attachments?)\b/i.test(L.h);}).slice(0,15);
+  for(var q=0;q<dl.length;q++){
+   var D=dl[q];
+   var fn=(D.d||D.h.split('?')[0].split('/').pop()||('arquivo_'+(q+1))).replace(/[^\w.\-]+/g,'_');
+   A.hfProgress(tok,'Baixando arquivo '+(q+1)+' de '+dl.length+'…');
+   var loc2=await grab(D.h,'arquivos','f'+q,fn);if(loc2)sum.files++;
+  }
+  var full=parts.join('\n\n');
+  sum.msgs=parts.length;sum.chars=full.length;
+  A.hfText(tok,'conversa-completa.txt',full);
+  if(last)A.hfText(tok,'ultima-resposta.txt',last);
+  if(lt.length)A.hfText(tok,'links.txt',lt.join('\n'));
+  var doc='<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(document.title)+'</title><style>body{font-family:sans-serif;background:#111;color:#eee;max-width:820px;margin:auto;padding:12px;line-height:1.5}.u{background:#1d2740;border-radius:12px;padding:10px;margin:16px 0}.c{margin:16px 0}pre{background:#000;padding:8px;overflow:auto;white-space:pre-wrap;border-radius:8px}img{max-width:100%}a{color:#8ab4ff}</style>'+html.join('\n');
+  if(doc.length<8000000)A.hfText(tok,'conversa.html',doc);
+ }catch(e){sum.err=String(e&&e.message||e);}
+ A.hfEnd(tok,JSON.stringify(sum));
+})();
+return 'started';
+})('__TOKEN__');"""
+
     const val STARTER = "Estou continuando um projeto que começou em outra conta do Claude " +
         "(o limite de lá acabou). Anexei um ZIP: leia primeiro o LEIA-ME-PRIMEIRO.md, depois a " +
         "conversa-anterior.txt; o código atual está na pasta codigo/. Entenda onde paramos e " +
         "continue exatamente de onde parou, sem refazer o que já está pronto. Eu só uso o celular: " +
         "entregue as mudanças como ZIP pronto para baixar (os arquivos alterados/novos na estrutura " +
         "do projeto), nunca código para copiar e colar. Se houver um trabalho-incompleto.txt, ele mostra " +
-        "o que o Claude anterior estava fazendo quando o limite acabou: termine a partir dali."
+        "o que o Claude anterior estava fazendo quando o limite acabou: termine a partir dali. A pasta " +
+        "chat-completo/ tem a conversa inteira com todos os blocos abertos, as imagens do chat e os links."
 
     private fun slug(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
@@ -175,15 +263,16 @@ return 'drop';}catch(e){return 'err:'+e.message;}})('__MODE__');"""
      */
     fun build(
         ctx: Context, fromName: String, fromTabId: String,
-        project: Project?, token: String, unfinished: String?, onStatus: (String) -> Unit
+        project: Project?, token: String, unfinished: String?, extraDir: File?, prefix: String,
+        onStatus: (String) -> Unit
     ): File? {
         val transcript = try { chatFile(ctx, fromTabId).readText() } catch (_: Exception) { "" }
-        if (transcript.isBlank() && project == null) return null
+        if (transcript.isBlank() && project == null && extraDir == null) return null
 
         val outDir = File(ctx.cacheDir, "handoff_out").apply { mkdirs() }
         outDir.listFiles()?.forEach { it.delete() }
         val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
-        val out = File(outDir, "continuar-${slug(project?.name ?: fromName)}-$stamp.zip")
+        val out = File(outDir, "$prefix-${slug(project?.name ?: fromName)}-$stamp.zip")
 
         val log = if (project != null) readLog(ctx, project.id) else ""
         val branch = project?.branch?.ifBlank { "main" } ?: "main"
@@ -214,6 +303,14 @@ return 'drop';}catch(e){return 'err:'+e.message;}})('__MODE__');"""
             put(z, "conversa-anterior.txt", transcript.ifBlank { "(nenhuma conversa capturada nesta aba)" })
             put(z, "entregas.txt", log.ifBlank { "(nenhuma entrega registrada)" })
             if (!unfinished.isNullOrBlank()) put(z, "trabalho-incompleto.txt", unfinished)
+            if (extraDir != null && extraDir.exists()) {
+                extraDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                    val rel = file.relativeTo(extraDir).path.replace('\\', '/')
+                    z.putNextEntry(ZipEntry("chat-completo/$rel"))
+                    file.inputStream().use { it.copyTo(z) }
+                    z.closeEntry()
+                }
+            }
 
             val tail = transcript.takeLast(6000)
             val md = buildString {
@@ -225,6 +322,7 @@ return 'drop';}catch(e){return 'err:'+e.message;}})('__MODE__');"""
                 appendLine("## O que tem neste ZIP")
                 appendLine("- `conversa-anterior.txt` — a conversa completa da conta anterior (use para entender pedidos, decisões e pendências).")
                 appendLine("- `entregas.txt` — ZIPs que já foram entregues ao GitHub e o resultado do build.")
+                if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/` e `links.txt`.")
                 if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
                 else appendLine("- (o código não pôde ser baixado; peça ao usuário o ZIP do projeto se precisar dele)")

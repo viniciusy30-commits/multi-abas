@@ -300,6 +300,22 @@ class MainActivity : AppCompatActivity() {
             dlTokens.remove(token)
             runOnUiThread { say("Não foi possível baixar", true) }
         }
+
+        // ── salvar chat completo (só aceita o token da sessão em andamento) ──
+        @JavascriptInterface
+        fun hfProgress(tok: String, msg: String) { hfSessions[tok]?.progress?.invoke(msg) }
+        @JavascriptInterface
+        fun hfText(tok: String, name: String, text: String) {
+            val ss = hfSessions[tok] ?: return
+            try { hfWrite(ss.dir, name, text.toByteArray(Charsets.UTF_8)) } catch (_: Exception) { }
+        }
+        @JavascriptInterface
+        fun hfBin(tok: String, name: String, mime: String, dataUrl: String) {
+            val ss = hfSessions[tok] ?: return
+            try { hfWrite(ss.dir, name, android.util.Base64.decode(dataUrl.substringAfter(","), android.util.Base64.DEFAULT)) } catch (_: Exception) { }
+        }
+        @JavascriptInterface
+        fun hfEnd(tok: String, summary: String) { hfSessions[tok]?.onEnd?.invoke(summary) }
     }
 
     private fun saveBytes(b: ByteArray, name: String, mime: String) {
@@ -539,6 +555,7 @@ class MainActivity : AppCompatActivity() {
         ))
         sh.section("Limite acabou?")
         sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Leva o projeto e a conversa para outra aba") { manualHandoff() }
+        sh.row(R.drawable.ic_download, "Salvar chat completo", "ZIP com a conversa inteira, imagens e links") { startHandoff(tabs[cur], null) }
         sh.show()
     }
 
@@ -878,27 +895,82 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startHandoff(from: Tab, to: Tab) {
+    private class HfSession(val dir: java.io.File, val progress: (String) -> Unit) {
+        @Volatile var onEnd: ((String) -> Unit)? = null
+    }
+    private val hfSessions = java.util.concurrent.ConcurrentHashMap<String, HfSession>()
+
+    private fun hfWrite(dir: java.io.File, name: String, bytes: ByteArray) {
+        val parts = name.replace('\\', '/').split('/')
+            .map { it.replace(Regex("[^\\w.\\-]+"), "_").trim('.') }.filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return
+        var d = dir
+        parts.dropLast(1).forEach { d = java.io.File(d, it) }
+        d.mkdirs()
+        java.io.File(d, parts.last()).writeBytes(bytes)
+    }
+
+    /**
+     * Salva o chat inteiro da aba: abre todos os blocos, guarda texto, HTML, imagens, links e arquivos.
+     * cb(pasta, últimaResposta, resumo) — pasta é null se não deu para ler o chat.
+     */
+    private fun captureFull(w: WebView?, progress: (String) -> Unit, cb: (java.io.File?, String?, JSONObject?) -> Unit) {
+        if (w == null || !(w.url ?: "").contains("claude.ai/chat")) { cb(null, null, null); return }
+        val tok = java.util.UUID.randomUUID().toString()
+        val root = java.io.File(cacheDir, "handoff_full").apply { mkdirs() }
+        root.listFiles()?.forEach { it.deleteRecursively() }
+        val dir = java.io.File(root, tok).apply { mkdirs() }
+        val sess = HfSession(dir, progress)
+        hfSessions[tok] = sess
+        var finished = false
+        val finish = { summary: String ->
+            if (!finished) {
+                finished = true
+                hfSessions.remove(tok)
+                val lastFile = java.io.File(dir, "ultima-resposta.txt")
+                val last = if (lastFile.exists()) lastFile.readText().takeLast(300_000) else null
+                val o = try { JSONObject(summary) } catch (_: Exception) { null }
+                val has = dir.listFiles()?.isNotEmpty() == true
+                cb(if (has) dir else null, last, o)
+            }
+        }
+        sess.onEnd = { sm -> runOnUiThread { finish(sm) } }
+        handler.postDelayed({ finish("") }, 150_000)
+        w.evaluateJavascript(Handoff.FULL_JS.replace("__TOKEN__", tok)) { r ->
+            if (r?.contains("nobridge") == true) finish("")
+        }
+    }
+
+    /** to = conta de destino; se for null, só salva o chat completo em Downloads. */
+    private fun startHandoff(from: Tab, to: Tab?) {
         val proj = Projects.current(this)
         val token = Projects.token(this)
-        val popup = BuildPopup(this, proj?.name ?: from.name, "Continuar em ${to.name}")
+        val popup = BuildPopup(this, proj?.name ?: from.name, if (to != null) "Continuar em ${to.name}" else "Salvar chat completo")
         val ui = HandoffUi(popup)
         popup.show()
-        popup.status("Preparando a continuação…")
+        popup.status("Preparando…")
         popup.progress(5)
         val info = Handoff.chatInfo(this, from.id)
         if (info != null) ui.set("chat", "✓", "Conversa salva ($info)")
-        else ui.set("chat", "–", "Sem conversa salva nesta aba (vai só o código)")
-        ui.set("incomp", "⏳", "Recuperando o trabalho que ficou pela metade")
-        popup.status("Abrindo os blocos da última resposta…")
-        recoverUnfinished(webs[from.id]) { unfinished ->
-            if (unfinished.isNullOrBlank()) ui.set("incomp", "–", "Nada em andamento para recuperar")
-            else ui.set("incomp", "✓", "Trabalho em andamento recuperado (${unfinished.length / 1000} mil caracteres)")
-            popup.progress(25)
+        else ui.set("chat", "–", "Sem conversa salva nesta aba")
+        ui.set("full", "⏳", "Salvando o chat completo (blocos, imagens, links)")
+        popup.status("Salvando o chat completo…")
+        captureFull(webs[from.id], { msg -> ui.set("full", "⏳", msg); popup.status(msg) }) { dir, unfinished, sum ->
+            if (dir == null) {
+                ui.set("full", "–", "Não consegui ler o chat completo (uso a conversa salva)")
+            } else {
+                val imgs = sum?.optInt("imgs") ?: 0
+                val files = sum?.optInt("files") ?: 0
+                val chars = sum?.optInt("chars") ?: 0
+                ui.set("full", "✓", "Chat completo: $imgs imagem(ns), $files arquivo(s), ${chars / 1000} mil caracteres")
+                val err = sum?.optString("err") ?: ""
+                if (err.isNotBlank()) ui.set("fullerr", "✗", "Parte do chat falhou: $err")
+            }
+            popup.progress(30)
             ui.set("pack", "⏳", "Montando o pacote")
             Thread {
                 val f = try {
-                    Handoff.build(this, from.name, from.id, proj, token, unfinished) { st ->
+                    Handoff.build(this, from.name, from.id, proj, token, unfinished, dir, if (to != null) "continuar" else "chat") { st ->
                         popup.status(st)
                         ui.set("pack", "⏳", st)
                     }
@@ -918,7 +990,14 @@ class MainActivity : AppCompatActivity() {
                     ui.set("pack", "✓", "Pacote montado ($mb)")
                     if (saved) ui.set("save", "✓", "ZIP salvo em Downloads") else ui.set("save", "✗", "Não consegui salvar em Downloads")
                     popup.progress(45)
-                    openInTarget(to, f, ui, popup)
+                    if (to != null) {
+                        openInTarget(to, f, ui, popup)
+                    } else {
+                        popup.progress(100)
+                        popup.status("Pronto ✓ ${f.name} em Downloads")
+                        popup.done(saved, null, null)
+                        say("Chat completo salvo em Downloads", true)
+                    }
                 }
             }.start()
         }

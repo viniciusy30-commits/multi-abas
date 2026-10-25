@@ -4,6 +4,8 @@
 - Quando aparecer o aviso de limite, ele oferece continuar em outra conta
 - Menu → Continuar em outra conta (ou segure a aba): monta um ZIP com a conversa, o log de entregas e o código atual do projeto
 - Abre um chat novo na outra conta, já com a mensagem pronta e o ZIP anexado
+- Salva o chat completo: blocos abertos, imagens, links e uma cópia em HTML (menu → Salvar chat completo, ou junto da continuação)
+- Anexa o ZIP direto na página da outra conta
 - Ajustes: interruptor "Salvar andamento do Claude"
 
 #id 2026-10-25-b
