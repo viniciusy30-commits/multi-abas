@@ -1,3 +1,17 @@
+#id 2026-10-24-b
+#titulo Atualizar e abrir o jogo
+- Depois do build OK, o app baixa o APK da release e avisa para instalar
+- Atalho no menu: Abrir jogo (usa o package cadastrado no projeto)
+- No projeto você informa o package (applicationId) do jogo
+
+#id 2026-10-24-a
+#titulo Claude em segundo plano + entrega automática
+- Ao minimizar, o Claude continua rodando (notificação "Multi Abas ativo")
+- Projeto atual global: escolha o repositório de destino no menu
+- Ao baixar um ZIP do Claude, o app sobe sozinho em _incoming/ do projeto
+- Acompanha o Actions e avisa se o build deu certo ou falhou
+- Token do GitHub em Configurações (uma vez só)
+
 #id 2026-10-12-f
 #titulo Links do GitHub pelo Chrome
 - Tocar num link do GitHub dentro do Claude abre pelo Chrome, com o seu login

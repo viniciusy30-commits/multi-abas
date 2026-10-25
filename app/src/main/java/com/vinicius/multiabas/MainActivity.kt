@@ -91,6 +91,10 @@ class MainActivity : AppCompatActivity() {
         select(cur)
         Updater.autoCheck(this)
         Novidades.show(this, false)
+        if (prefs.getBoolean("keepalive", true)) {
+            maybeRequestNotifPermission()
+            KeepAliveService.start(this)
+        }
     }
 
     private fun newTab(name: String) = Tab(System.currentTimeMillis().toString(), name, HOME)
@@ -172,7 +176,10 @@ class MainActivity : AppCompatActivity() {
                 val fin = if (clean.isEmpty()) "claude_" + System.currentTimeMillis() + "." + ext
                     else if (!clean.contains('.')) clean + "." + ext else clean
                 saveBytes(bytes, fin, mime)
-                runOnUiThread { Toast.makeText(this@MainActivity, "Salvo em Downloads: $fin", Toast.LENGTH_LONG).show() }
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Salvo em Downloads: $fin", Toast.LENGTH_LONG).show()
+                    maybeDeliverZip(fin, bytes)
+                }
             } catch (e: Exception) {
                 runOnUiThread { Toast.makeText(this@MainActivity, "Falha ao salvar o arquivo", Toast.LENGTH_LONG).show() }
             }
@@ -318,20 +325,220 @@ class MainActivity : AppCompatActivity() {
 
     private fun showMenu(anchor: View) {
         val m = PopupMenu(this, anchor)
-        m.menu.add(0, 1, 0, "Recarregar"); m.menu.add(0, 2, 1, "Configurações")
+        val proj = Projects.current(this)
+        val projLabel = if (proj == null) "Projeto atual: (nenhum)" else "Projeto atual: ${proj.name}"
+        m.menu.add(0, 10, 0, projLabel)
+        m.menu.add(0, 11, 1, "Gerenciar projetos")
+        m.menu.add(0, 12, 2, "Abrir jogo")
+        m.menu.add(0, 1, 3, "Recarregar")
+        m.menu.add(0, 2, 4, "Configurações")
         m.setOnMenuItemClickListener {
-            if (it.itemId == 1) webs[tabs[cur].id]?.reload() else settings()
+            when (it.itemId) {
+                10, 11 -> projectPicker()
+                12 -> openCurrentGame()
+                1 -> webs[tabs[cur].id]?.reload()
+                2 -> settings()
+            }
             true
         }
         m.show()
     }
 
     private fun settings() {
-        AlertDialog.Builder(this).setTitle("Configurações")
-            .setMessage("Multi Abas versão ${BuildConfig.VERSION_NAME}")
-            .setPositiveButton("Verificar atualização") { _, _ -> Updater.check(this, true) }
-            .setNeutralButton("O que mudou") { _, _ -> Novidades.show(this, true) }
+        val items = arrayOf(
+            "Token do GitHub",
+            "Projeto atual / gerenciar",
+            "Segundo plano (manter Claude vivo)",
+            "Verificar atualização",
+            "O que mudou"
+        )
+        AlertDialog.Builder(this).setTitle("Configurações — v${BuildConfig.VERSION_NAME}")
+            .setItems(items) { _, w ->
+                when (w) {
+                    0 -> editToken()
+                    1 -> projectPicker()
+                    2 -> toggleKeepAlive()
+                    3 -> Updater.check(this, true)
+                    4 -> Novidades.show(this, true)
+                }
+            }
             .setNegativeButton("Fechar", null).show()
+    }
+
+    private fun editToken() {
+        val e = EditText(this)
+        e.setSingleLine()
+        e.hint = "ghp_… ou github_pat_…"
+        e.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        val cur = Projects.token(this)
+        if (cur.isNotEmpty()) e.setText(cur)
+        AlertDialog.Builder(this).setTitle("Token do GitHub")
+            .setMessage("Personal Access Token com permissão de conteúdo (repo) e actions. Cole aqui e salve.")
+            .setView(e)
+            .setPositiveButton("Salvar") { _, _ ->
+                Projects.setToken(this, e.text.toString())
+                Toast.makeText(this, if (e.text.toString().trim().isEmpty()) "Token apagado" else "Token salvo", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun toggleKeepAlive() {
+        val on = prefs.getBoolean("keepalive", true)
+        val msg = if (on)
+            "Segundo plano está LIGADO.\nO Claude continua quando você minimiza (notificação fixa)."
+        else
+            "Segundo plano está DESLIGADO.\nAo minimizar, o sistema pode interromper o Claude."
+        AlertDialog.Builder(this).setTitle("Segundo plano")
+            .setMessage(msg)
+            .setPositiveButton(if (on) "Desligar" else "Ligar") { _, _ ->
+                val next = !on
+                prefs.edit().putBoolean("keepalive", next).apply()
+                if (next) {
+                    maybeRequestNotifPermission()
+                    KeepAliveService.start(this)
+                    Toast.makeText(this, "Segundo plano ligado", Toast.LENGTH_SHORT).show()
+                } else {
+                    KeepAliveService.stop(this)
+                    Toast.makeText(this, "Segundo plano desligado", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Fechar", null).show()
+    }
+
+    private fun maybeRequestNotifPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 91)
+            }
+        }
+    }
+
+    private fun maybeDeliverZip(name: String, bytes: ByteArray) {
+        if (!name.lowercase().endsWith(".zip")) return
+        val proj = Projects.current(this)
+        if (proj == null) {
+            Toast.makeText(this, "ZIP salvo. Defina um Projeto atual no menu para enviar ao GitHub.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (Projects.token(this).isBlank()) {
+            Toast.makeText(this, "ZIP salvo. Configure o Token do GitHub em Configurações.", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "Enviando $name → ${proj.name}…", Toast.LENGTH_SHORT).show()
+        GitHubDelivery.deliver(this, proj, name, bytes) { status ->
+            runOnUiThread { Toast.makeText(this, status, Toast.LENGTH_SHORT).show() }
+        }
+    }
+
+    private fun openCurrentGame() {
+        val p = Projects.current(this)
+        if (p == null) {
+            Toast.makeText(this, "Defina um Projeto atual primeiro", Toast.LENGTH_SHORT).show()
+            projectPicker()
+            return
+        }
+        if (p.packageName.isBlank()) {
+            Toast.makeText(this, "Cadastre o package do jogo no projeto (ex: com.xxx.jogo)", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!GitHubDelivery.openGame(this, p)) {
+            Toast.makeText(this, "Jogo não instalado. Depois do build, instale pelo aviso.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun projectPicker() {
+        val list = Projects.load(this)
+        val curId = Projects.currentId(this)
+        val labels = mutableListOf<String>()
+        list.forEach {
+            val mark = if (it.id == curId) "✓ " else ""
+            val br = if (it.branch.isBlank()) "auto" else it.branch
+            labels.add("$mark${it.name}  (${it.fullRepo()} · $br/${it.folder})")
+        }
+        labels.add("+ Novo projeto")
+        AlertDialog.Builder(this).setTitle("Projeto atual")
+            .setItems(labels.toTypedArray()) { _, w ->
+                if (w == list.size) editProject(-1)
+                else {
+                    Projects.setCurrentId(this, list[w].id)
+                    Toast.makeText(this, "Projeto: ${list[w].name}", Toast.LENGTH_SHORT).show()
+                    projectOptions(w)
+                }
+            }
+            .setNegativeButton("Fechar", null).show()
+    }
+
+    private fun projectOptions(i: Int) {
+        val list = Projects.load(this)
+        if (i < 0 || i >= list.size) return
+        val p = list[i]
+        AlertDialog.Builder(this).setTitle(p.name)
+            .setItems(arrayOf("Usar este projeto", "Abrir jogo", "Editar", "Remover")) { _, w ->
+                when (w) {
+                    0 -> {
+                        Projects.setCurrentId(this, p.id)
+                        Toast.makeText(this, "Projeto atual: ${p.name}", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> {
+                        Projects.setCurrentId(this, p.id)
+                        openCurrentGame()
+                    }
+                    2 -> editProject(i)
+                    3 -> AlertDialog.Builder(this).setTitle("Remover ${p.name}?")
+                        .setPositiveButton("Remover") { _, _ ->
+                            val id = p.id
+                            val n = list.toMutableList().also { it.removeAt(i) }
+                            Projects.save(this, n)
+                            if (Projects.currentId(this) == id) Projects.setCurrentId(this, n.firstOrNull()?.id ?: "")
+                            Toast.makeText(this, "Removido", Toast.LENGTH_SHORT).show()
+                        }.setNegativeButton("Cancelar", null).show()
+                }
+            }.show()
+    }
+
+    private fun editProject(i: Int) {
+        val list = Projects.load(this)
+        val existing = if (i >= 0 && i < list.size) list[i] else null
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(56, 16, 56, 0)
+        fun field(hint: String, value: String): EditText {
+            val e = EditText(this)
+            e.hint = hint
+            e.setSingleLine()
+            e.setText(value)
+            box.addView(e)
+            return e
+        }
+        val n = field("Nome (ex: Masmorras)", existing?.name ?: "")
+        val owner = field("Dono do repo (ex: viniciusy30-commits)", existing?.owner ?: "viniciusy30-commits")
+        val repo = field("Nome do repositório (ex: masmorras-rpg)", existing?.repo ?: "")
+        val branch = field("Branch (vazio = padrão do GitHub)", existing?.branch ?: "")
+        val folder = field("Pasta do zip (padrão _incoming)", existing?.folder ?: "_incoming")
+        val pkg = field("Package do jogo (ex: com.vinicius.masmorras)", existing?.packageName ?: "")
+        AlertDialog.Builder(this).setTitle(if (existing == null) "Novo projeto" else "Editar projeto")
+            .setView(box)
+            .setPositiveButton("Salvar") { _, _ ->
+                val name = n.text.toString().trim().ifEmpty { repo.text.toString().trim() }
+                val r = repo.text.toString().trim()
+                if (r.isEmpty()) {
+                    Toast.makeText(this, "Informe o repositório", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val p = existing ?: Project(System.currentTimeMillis().toString(), name, owner.text.toString().trim(), r)
+                p.name = name
+                p.owner = owner.text.toString().trim().ifEmpty { "viniciusy30-commits" }
+                p.repo = r
+                p.branch = branch.text.toString().trim()
+                p.folder = folder.text.toString().trim().ifEmpty { "_incoming" }
+                p.packageName = pkg.text.toString().trim()
+                val nlist = list.toMutableList()
+                if (existing == null) nlist.add(p) else nlist[i] = p
+                Projects.save(this, nlist)
+                Projects.setCurrentId(this, p.id)
+                Toast.makeText(this, "Projeto salvo: ${p.name}", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun loadFavs() {
@@ -458,8 +665,23 @@ class MainActivity : AppCompatActivity() {
         override fun run() { tickNow(); handler.postDelayed(this, 1000) }
     }
 
-    override fun onResume() { super.onResume(); handler.post(ticker) }
-    override fun onPause() { super.onPause(); handler.removeCallbacks(ticker) }
+    override fun onResume() {
+        super.onResume()
+        handler.post(ticker)
+        if (prefs.getBoolean("keepalive", true)) KeepAliveService.start(this)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        handler.removeCallbacks(ticker)
+        // Não pausa os WebViews: o KeepAliveService mantém o processo vivo
+    }
+
+    override fun onDestroy() {
+        // Se o usuário fechou de verdade (não só girou a tela), para o serviço
+        if (isFinishing) KeepAliveService.stop(this)
+        super.onDestroy()
+    }
 
     private fun tickNow() {
         for (k in 0 until rv.childCount) {
