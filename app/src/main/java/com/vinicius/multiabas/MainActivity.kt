@@ -868,32 +868,134 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    /** Lista de etapas (✓ ⏳ ✗) mostrada no popup da continuação. */
+    private class HandoffUi(val popup: BuildPopup) {
+        private val lines = LinkedHashMap<String, String>()
+        @Synchronized
+        fun set(key: String, icon: String, text: String) {
+            lines[key] = "$icon $text"
+            popup.steps(lines.values.joinToString("\n"))
+        }
+    }
+
     private fun startHandoff(from: Tab, to: Tab) {
         val proj = Projects.current(this)
         val token = Projects.token(this)
         val popup = BuildPopup(this, proj?.name ?: from.name, "Continuar em ${to.name}")
+        val ui = HandoffUi(popup)
         popup.show()
-        popup.status("Montando o pacote…")
+        popup.status("Preparando a continuação…")
+        popup.progress(5)
+        val info = Handoff.chatInfo(this, from.id)
+        if (info != null) ui.set("chat", "✓", "Conversa salva ($info)")
+        else ui.set("chat", "–", "Sem conversa salva nesta aba (vai só o código)")
+        ui.set("pack", "⏳", "Montando o pacote")
         Thread {
             val f = try {
-                Handoff.build(this, from.name, from.id, proj, token) { popup.status(it) }
+                Handoff.build(this, from.name, from.id, proj, token) { st ->
+                    popup.status(st)
+                    ui.set("pack", "⏳", st)
+                }
             } catch (e: Exception) { null }
+            var saved = false
+            if (f != null) {
+                try { saveBytes(f.readBytes(), f.name, "application/zip"); saved = true } catch (_: Exception) { }
+            }
             runOnUiThread {
                 if (f == null) {
-                    popup.status("Não consegui montar o pacote (sem conversa e sem projeto).")
+                    ui.set("pack", "✗", "Não consegui montar o pacote")
+                    popup.status("Falhou ✗ (sem conversa e sem projeto)")
                     popup.done(false, null, null)
                     return@runOnUiThread
                 }
-                try { saveBytes(f.readBytes(), f.name, "application/zip") } catch (_: Exception) { }
-                popup.status("Pronto ✓ Abrindo \"${to.name}\" e anexando…")
-                popup.done(true, null, null)
-                openInTarget(to, f)
+                val mb = String.format(java.util.Locale.US, "%.1f MB", f.length() / 1048576.0)
+                ui.set("pack", "✓", "Pacote montado ($mb)")
+                if (saved) ui.set("save", "✓", "ZIP salvo em Downloads") else ui.set("save", "✗", "Não consegui salvar em Downloads")
+                popup.progress(45)
+                openInTarget(to, f, ui, popup)
             }
         }.start()
     }
 
-    /** Abre um chat novo na aba de destino, escreve a mensagem inicial e abre o anexar com o ZIP. */
-    private fun openInTarget(to: Tab, f: java.io.File) {
+    private val FIND_PLUS_JS = """(function(){
+function c(el){var r=el.getBoundingClientRect();if(r.width<4||r.height<4)return null;return (r.left+r.width/2)+','+(r.top+r.height/2)+','+window.innerWidth;}
+var bad=/send|enviar|mic|voz|voice|audio|dict|stop|parar|model|modelo/i;
+var sels=['button[aria-label*="attach" i]','button[aria-label*="Upload" i]','button[aria-label*="Add files" i]','button[aria-label*="Anexar" i]','button[aria-label*="Adicionar" i]','button[data-testid*="attach" i]','button[data-testid*="file" i]','[data-testid="input-menu-plus"]'];
+for(var i=0;i<sels.length;i++){var b=document.querySelector(sels[i]);if(b){var s=c(b);if(s)return s;}}
+var p=document.querySelector('div[contenteditable="true"]');
+for(var k=0;k<8&&p;k++){p=p.parentElement;if(!p)break;var bs=p.querySelectorAll('button');if(bs.length>=2){
+var best=null,bl=1e9;
+for(var j=0;j<bs.length;j++){var a=(bs[j].getAttribute('aria-label')||'')+' '+(bs[j].innerText||'');if(bad.test(a))continue;var r=bs[j].getBoundingClientRect();if(r.width<4)continue;if(r.left<bl){bl=r.left;best=bs[j];}}
+if(best){var s2=c(best);if(s2)return s2;}}}
+return 'none';})();"""
+
+    private val FIND_ITEM_JS = """(function(){
+function c(el){var r=el.getBoundingClientRect();if(r.width<4||r.height<4)return null;return (r.left+r.width/2)+','+(r.top+r.height/2)+','+window.innerWidth;}
+var re=/(upload|arquivo|file|photo|foto|anex|attach)/i,no=/(drive|github|conector|connector|projeto|project|screenshot|captura)/i;
+var els=document.querySelectorAll('[role=menuitem],[role=option],[data-radix-collection-item],[role=menu] button,[role=menu] div');
+for(var i=0;i<els.length;i++){var t=((els[i].innerText||'')+' '+(els[i].getAttribute('aria-label')||'')).trim();
+if(t.length>0&&t.length<70&&re.test(t)&&!no.test(t)){var s=c(els[i]);if(s)return s;}}
+return 'none';})();"""
+
+    /** Toque de verdade (com "gesto do usuário") no elemento que o JS encontrar. */
+    private fun tapByJs(w: WebView, js: String, done: (Boolean) -> Unit) {
+        w.evaluateJavascript(js) { raw ->
+            val p = (raw ?: "none").trim('"').split(',')
+            if (p.size < 3) {
+                done(false)
+            } else {
+                try {
+                    val iw = p[2].toFloat()
+                    val k = if (iw > 0) w.width / iw else 1f
+                    val x = p[0].toFloat() * k
+                    val y = p[1].toFloat() * k
+                    val t0 = android.os.SystemClock.uptimeMillis()
+                    val d = android.view.MotionEvent.obtain(t0, t0, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+                    w.dispatchTouchEvent(d); d.recycle()
+                    w.postDelayed({
+                        val u = android.view.MotionEvent.obtain(t0, android.os.SystemClock.uptimeMillis(), android.view.MotionEvent.ACTION_UP, x, y, 0)
+                        w.dispatchTouchEvent(u); u.recycle()
+                        done(true)
+                    }, 80)
+                } catch (_: Exception) { done(false) }
+            }
+        }
+    }
+
+    /** Tenta abrir o seletor de arquivos do Claude e entregar o ZIP; confere se o seletor foi usado. */
+    private fun attachWithRetries(to: Tab, uri: Uri, attempt: Int, result: (Boolean) -> Unit) {
+        val w = webs[to.id]
+        if (w == null) { result(false); return }
+        pendingClaudeFile = arrayOf(uri)
+        if (attempt == 0) {
+            w.evaluateJavascript("(function(){var i=document.querySelector('input[type=file]');if(i){i.click();return 'input';}return 'none';})();", null)
+        } else {
+            tapByJs(w, FIND_ITEM_JS) { found ->
+                if (!found) tapByJs(w, FIND_PLUS_JS) { _ ->
+                    w.postDelayed({ tapByJs(w, FIND_ITEM_JS) { } }, 900)
+                }
+            }
+        }
+        w.postDelayed({
+            when {
+                pendingClaudeFile == null -> result(true)
+                attempt < 3 -> attachWithRetries(to, uri, attempt + 1, result)
+                else -> { pendingClaudeFile = null; result(false) }
+            }
+        }, if (attempt == 0) 2000L else 3500L)
+    }
+
+    /** Espera a caixa de mensagem aparecer (até ~14s). */
+    private fun waitComposer(w: WebView, tries: Int, cb: (Boolean) -> Unit) {
+        w.evaluateJavascript("(function(){return document.querySelector('div[contenteditable=\"true\"]')?'yes':'no';})();") { r ->
+            if (r?.contains("yes") == true) cb(true)
+            else if (tries <= 0) cb(false)
+            else w.postDelayed({ waitComposer(w, tries - 1, cb) }, 700)
+        }
+    }
+
+    /** Abre um chat novo na aba de destino, escreve a mensagem inicial e anexa o ZIP. */
+    private fun openInTarget(to: Tab, f: java.io.File, ui: HandoffUi, popup: BuildPopup) {
         try {
             val uri = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f)
             val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -902,23 +1004,49 @@ class MainActivity : AppCompatActivity() {
             if (idx < 0) return
             select(idx)
             val w = webs[to.id] ?: return
+            ui.set("open", "⏳", "Abrindo \"${to.name}\"")
+            popup.status("Abrindo a outra conta…")
+            popup.progress(55)
             w.loadUrl("https://claude.ai/new")
             val fill = "(function(){var e=document.querySelector('div[contenteditable=\"true\"]');" +
                 "if(!e)return 'none';e.focus();document.execCommand('insertText',false," +
                 JSONObject.quote(Handoff.STARTER) + ");return 'ok';})();"
             w.postDelayed({
-                w.evaluateJavascript(fill) { r ->
-                    pendingClaudeFile = arrayOf(uri)
-                    w.postDelayed({ triggerClaudeAttach() }, 600)
-                    if (r?.contains("ok") != true) {
-                        say("Entre na conta \"${to.name}\", cole a mensagem (já copiada) e anexe o ZIP de Downloads.", true)
-                    } else {
-                        say("Mensagem pronta. Se o anexo não abrir sozinho, use o ZIP em Downloads.", true)
+                waitComposer(w, 20) { ready ->
+                    if (!ready) {
+                        ui.set("open", "✗", "A conta \"${to.name}\" não abriu o chat (está logada?)")
+                        popup.status("Falhou ✗ — ZIP está em Downloads")
+                        popup.done(false, null, null)
+                        return@waitComposer
+                    }
+                    ui.set("open", "✓", "Conta \"${to.name}\" aberta")
+                    popup.progress(70)
+                    w.evaluateJavascript(fill) { r ->
+                        if (r?.contains("ok") == true) ui.set("fill", "✓", "Mensagem inicial escrita")
+                        else ui.set("fill", "✗", "Não escrevi a mensagem (já copiei: cole no chat)")
+                        popup.progress(80)
+                        ui.set("attach", "⏳", "Anexando o ZIP")
+                        popup.status("Anexando o ZIP…")
+                        attachWithRetries(to, uri, 0) { ok ->
+                            if (ok) {
+                                ui.set("attach", "✓", "ZIP anexado")
+                                popup.progress(100)
+                                popup.status("Tudo pronto ✓ Revise e envie a mensagem")
+                                popup.done(true, null, null)
+                                say("Pronto! Revise e envie a mensagem.", true)
+                            } else {
+                                ui.set("attach", "✗", "Não anexou sozinho: toque em + e anexe ${f.name} (Downloads)")
+                                popup.status("Quase: falta só anexar o ZIP")
+                                popup.done(false, null, null)
+                            }
+                        }
                     }
                 }
-            }, 4500)
+            }, 2500)
         } catch (e: Exception) {
-            say("ZIP salvo em Downloads. Anexe na outra conta: ${e.message}", true)
+            ui.set("open", "✗", "Erro: ${e.message}")
+            popup.status("Falhou ✗ — ZIP está em Downloads")
+            popup.done(false, null, null)
         }
     }
 
