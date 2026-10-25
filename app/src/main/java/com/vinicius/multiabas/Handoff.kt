@@ -103,12 +103,55 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:r
     private fun readLog(ctx: Context, projectId: String): String =
         try { logFile(ctx, projectId).readText() } catch (_: Exception) { "" }
 
+    fun unquote(raw: String?): String? {
+        if (raw.isNullOrBlank() || raw == "null") return null
+        return try { JSONArray("[$raw]").getString(0) } catch (_: Exception) { null }
+    }
+
+    /** Abre os blocos recolhidos ("executou N comandos") da ÚLTIMA resposta do Claude. Devolve quantos abriu. */
+    const val EXPAND_JS = """(function(){var all=document.querySelectorAll('[data-is-streaming]');
+if(!all.length)all=document.querySelectorAll('.font-claude-response,.font-claude-message');
+var m=all[all.length-1];if(!m)return '0';
+var bs=m.querySelectorAll('button[aria-expanded="false"]');var n=0;
+for(var i=0;i<bs.length;i++){try{bs[i].click();n++;}catch(e){}}
+return String(n);})();"""
+
+    /** Texto da última resposta do Claude (com os blocos já abertos). */
+    const val READ_LAST_JS = """(function(){var all=document.querySelectorAll('[data-is-streaming]');
+if(!all.length)all=document.querySelectorAll('.font-claude-response,.font-claude-message');
+var m=all[all.length-1];if(!m)return '';
+return (m.innerText||'').trim();})();"""
+
+    /** Monta o File do ZIP (base64 já em window.__hf) e guarda em window.__hfDt. */
+    const val BUILD_JS = """(function(name){try{var b=atob(window.__hf);var u=new Uint8Array(b.length);
+for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
+var f=new File([u],name,{type:'application/zip'});var dt=new DataTransfer();dt.items.add(f);
+window.__hfDt=dt;window.__hf='';return 'ok';}catch(e){return 'err:'+e.message;}})(__NAME__);"""
+
+    /** Entrega o arquivo à página: direto no input[type=file] ou simulando arrastar-e-soltar. */
+    const val INJECT_JS = """(function(mode){try{var dt=window.__hfDt;if(!dt)return 'nodt';
+if(mode==='input'){var ins=document.querySelectorAll('input[type=file]'),pick=null;
+for(var j=0;j<ins.length;j++){var a=(ins[j].getAttribute('accept')||'').toLowerCase();
+if(!a||a.indexOf('zip')>=0||a.indexOf('*/*')>=0||(a.indexOf('.')>=0&&a.indexOf('image')<0)){pick=ins[j];break;}}
+if(!pick&&ins.length)pick=ins[0];
+if(!pick)return 'noinput';
+pick.files=dt.files;
+pick.dispatchEvent(new Event('input',{bubbles:true}));
+pick.dispatchEvent(new Event('change',{bubbles:true}));
+return 'input';}
+var ed=document.querySelector('div[contenteditable="true"]');
+if(!ed)return 'noeditor';
+var t=ed.closest('fieldset,form')||ed.parentElement||ed;
+['dragenter','dragover','drop'].forEach(function(n){t.dispatchEvent(new DragEvent(n,{bubbles:true,cancelable:true,dataTransfer:dt}));});
+return 'drop';}catch(e){return 'err:'+e.message;}})('__MODE__');"""
+
     const val STARTER = "Estou continuando um projeto que começou em outra conta do Claude " +
         "(o limite de lá acabou). Anexei um ZIP: leia primeiro o LEIA-ME-PRIMEIRO.md, depois a " +
         "conversa-anterior.txt; o código atual está na pasta codigo/. Entenda onde paramos e " +
         "continue exatamente de onde parou, sem refazer o que já está pronto. Eu só uso o celular: " +
         "entregue as mudanças como ZIP pronto para baixar (os arquivos alterados/novos na estrutura " +
-        "do projeto), nunca código para copiar e colar."
+        "do projeto), nunca código para copiar e colar. Se houver um trabalho-incompleto.txt, ele mostra " +
+        "o que o Claude anterior estava fazendo quando o limite acabou: termine a partir dali."
 
     private fun slug(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
@@ -132,7 +175,7 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:r
      */
     fun build(
         ctx: Context, fromName: String, fromTabId: String,
-        project: Project?, token: String, onStatus: (String) -> Unit
+        project: Project?, token: String, unfinished: String?, onStatus: (String) -> Unit
     ): File? {
         val transcript = try { chatFile(ctx, fromTabId).readText() } catch (_: Exception) { "" }
         if (transcript.isBlank() && project == null) return null
@@ -170,6 +213,7 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:r
             onStatus("Salvando a conversa…")
             put(z, "conversa-anterior.txt", transcript.ifBlank { "(nenhuma conversa capturada nesta aba)" })
             put(z, "entregas.txt", log.ifBlank { "(nenhuma entrega registrada)" })
+            if (!unfinished.isNullOrBlank()) put(z, "trabalho-incompleto.txt", unfinished)
 
             val tail = transcript.takeLast(6000)
             val md = buildString {
@@ -181,6 +225,7 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:r
                 appendLine("## O que tem neste ZIP")
                 appendLine("- `conversa-anterior.txt` — a conversa completa da conta anterior (use para entender pedidos, decisões e pendências).")
                 appendLine("- `entregas.txt` — ZIPs que já foram entregues ao GitHub e o resultado do build.")
+                if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
                 else appendLine("- (o código não pôde ser baixado; peça ao usuário o ZIP do projeto se precisar dele)")
                 appendLine()

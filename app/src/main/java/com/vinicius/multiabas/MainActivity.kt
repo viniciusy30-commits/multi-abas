@@ -889,32 +889,96 @@ class MainActivity : AppCompatActivity() {
         val info = Handoff.chatInfo(this, from.id)
         if (info != null) ui.set("chat", "✓", "Conversa salva ($info)")
         else ui.set("chat", "–", "Sem conversa salva nesta aba (vai só o código)")
-        ui.set("pack", "⏳", "Montando o pacote")
-        Thread {
-            val f = try {
-                Handoff.build(this, from.name, from.id, proj, token) { st ->
-                    popup.status(st)
-                    ui.set("pack", "⏳", st)
+        ui.set("incomp", "⏳", "Recuperando o trabalho que ficou pela metade")
+        popup.status("Abrindo os blocos da última resposta…")
+        recoverUnfinished(webs[from.id]) { unfinished ->
+            if (unfinished.isNullOrBlank()) ui.set("incomp", "–", "Nada em andamento para recuperar")
+            else ui.set("incomp", "✓", "Trabalho em andamento recuperado (${unfinished.length / 1000} mil caracteres)")
+            popup.progress(25)
+            ui.set("pack", "⏳", "Montando o pacote")
+            Thread {
+                val f = try {
+                    Handoff.build(this, from.name, from.id, proj, token, unfinished) { st ->
+                        popup.status(st)
+                        ui.set("pack", "⏳", st)
+                    }
+                } catch (e: Exception) { null }
+                var saved = false
+                if (f != null) {
+                    try { saveBytes(f.readBytes(), f.name, "application/zip"); saved = true } catch (_: Exception) { }
                 }
-            } catch (e: Exception) { null }
-            var saved = false
-            if (f != null) {
-                try { saveBytes(f.readBytes(), f.name, "application/zip"); saved = true } catch (_: Exception) { }
+                runOnUiThread {
+                    if (f == null) {
+                        ui.set("pack", "✗", "Não consegui montar o pacote")
+                        popup.status("Falhou ✗ (sem conversa e sem projeto)")
+                        popup.done(false, null, null)
+                        return@runOnUiThread
+                    }
+                    val mb = String.format(java.util.Locale.US, "%.1f MB", f.length() / 1048576.0)
+                    ui.set("pack", "✓", "Pacote montado ($mb)")
+                    if (saved) ui.set("save", "✓", "ZIP salvo em Downloads") else ui.set("save", "✗", "Não consegui salvar em Downloads")
+                    popup.progress(45)
+                    openInTarget(to, f, ui, popup)
+                }
+            }.start()
+        }
+    }
+
+    /** Abre os blocos "executou N comandos" da última resposta (até 3 níveis) e lê o texto completo. */
+    private fun recoverUnfinished(w: WebView?, cb: (String?) -> Unit) {
+        if (w == null || (w.url ?: "").contains("claude.ai/chat").not()) { cb(null); return }
+        fun read() {
+            w.evaluateJavascript(Handoff.READ_LAST_JS) { raw ->
+                val t = Handoff.unquote(raw)
+                cb(if (t.isNullOrBlank()) null else t.takeLast(300_000))
             }
+        }
+        fun round(n: Int) {
+            w.evaluateJavascript(Handoff.EXPAND_JS) { r ->
+                val opened = r?.trim('"')?.toIntOrNull() ?: 0
+                if (opened > 0 && n < 3) w.postDelayed({ round(n + 1) }, 900)
+                else w.postDelayed({ read() }, 600)
+            }
+        }
+        round(1)
+    }
+
+    /** Anexa o ZIP: 1) direto no campo de arquivo da página, 2) arrastar-e-soltar, 3) toques no menu. */
+    private fun attachZip(to: Tab, f: java.io.File, uri: Uri, result: (Boolean) -> Unit) {
+        val w = webs[to.id]
+        if (w == null) { result(false); return }
+        if (f.length() > 25L * 1024 * 1024) { attachWithRetries(to, uri, 1, result); return }
+        Thread {
+            val b64 = try { android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP) } catch (e: Exception) { null }
             runOnUiThread {
-                if (f == null) {
-                    ui.set("pack", "✗", "Não consegui montar o pacote")
-                    popup.status("Falhou ✗ (sem conversa e sem projeto)")
-                    popup.done(false, null, null)
-                    return@runOnUiThread
+                if (b64 == null) { attachWithRetries(to, uri, 1, result); return@runOnUiThread }
+                w.evaluateJavascript("window.__hf='';", null)
+                var i = 0
+                while (i < b64.length) {
+                    val part = b64.substring(i, minOf(i + 200_000, b64.length))
+                    w.evaluateJavascript("window.__hf+='$part';", null)
+                    i += 200_000
                 }
-                val mb = String.format(java.util.Locale.US, "%.1f MB", f.length() / 1048576.0)
-                ui.set("pack", "✓", "Pacote montado ($mb)")
-                if (saved) ui.set("save", "✓", "ZIP salvo em Downloads") else ui.set("save", "✗", "Não consegui salvar em Downloads")
-                popup.progress(45)
-                openInTarget(to, f, ui, popup)
+                w.evaluateJavascript(Handoff.BUILD_JS.replace("__NAME__", JSONObject.quote(f.name)), null)
+                val cleanup = { w.evaluateJavascript("window.__hf='';window.__hfDt=null;", null) }
+                tryInject(w, f.name, "input") { ok1 ->
+                    if (ok1) { cleanup(); result(true) }
+                    else tryInject(w, f.name, "drop") { ok2 ->
+                        cleanup()
+                        if (ok2) result(true) else attachWithRetries(to, uri, 1, result)
+                    }
+                }
             }
         }.start()
+    }
+
+    private fun tryInject(w: WebView, name: String, mode: String, cb: (Boolean) -> Unit) {
+        w.evaluateJavascript(Handoff.INJECT_JS.replace("__MODE__", mode), null)
+        w.postDelayed({
+            w.evaluateJavascript("(function(n){return document.body.innerText.indexOf(n)>=0?'yes':'no';})(" + JSONObject.quote(name) + ");") { r ->
+                cb(r?.contains("yes") == true)
+            }
+        }, 2500)
     }
 
     private val FIND_PLUS_JS = """(function(){
@@ -1027,7 +1091,7 @@ return 'none';})();"""
                         popup.progress(80)
                         ui.set("attach", "⏳", "Anexando o ZIP")
                         popup.status("Anexando o ZIP…")
-                        attachWithRetries(to, uri, 0) { ok ->
+                        attachZip(to, f, uri) { ok ->
                             if (ok) {
                                 ui.set("attach", "✓", "ZIP anexado")
                                 popup.progress(100)
