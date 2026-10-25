@@ -68,6 +68,7 @@ class BuildPopup(private val act: Activity, projectName: String, title: String =
         }
         scroll.background = Ui.shape(act, Color.parseColor("#12151B"), 16, Ui.color(act, R.color.outline), 1)
         scroll.addView(steps)
+        scroll.visibility = View.GONE
         root.addView(scroll, LinearLayout.LayoutParams(-1, dp(250)).apply { topMargin = dp(12); bottomMargin = dp(12) })
 
         val row = LinearLayout(act).apply {
@@ -118,6 +119,7 @@ class BuildPopup(private val act: Activity, projectName: String, title: String =
         act.runOnUiThread {
             if (!alive()) return@runOnUiThread
             val atBottom = scroll.getChildAt(0).bottom - (scroll.height + scroll.scrollY) < dp(40)
+            scroll.visibility = View.VISIBLE
             steps.text = colorize(text)
             if (atBottom) scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
         }

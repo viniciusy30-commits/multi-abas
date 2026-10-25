@@ -17,8 +17,9 @@ data class Project(
 ) {
     fun fullRepo() = "$owner/$repo"
     fun pathFor(file: String): String {
-        val f = folder.trim().trim('/')
-        return if (f.isEmpty()) file else "$f/$file"
+        // descarta partes vazias, "." e ".." — o GitHub recusa caminhos assim (HTTP 422)
+        val parts = folder.split('/', '\\').map { it.trim() }.filter { it.isNotEmpty() && it != "." && it != ".." }
+        return (parts + file).joinToString("/")
     }
 }
 

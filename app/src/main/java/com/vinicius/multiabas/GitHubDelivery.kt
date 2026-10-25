@@ -25,10 +25,23 @@ object GitHubDelivery {
     private const val CHANNEL = "delivery"
     private const val NOTIF_BASE = 100
 
+    /** Nome seguro para o GitHub: sem acentos, espaços ou símbolos; sempre termina em .zip. */
+    fun safeName(name: String): String {
+        val base = name.substringAfterLast('/').substringAfterLast('\\')
+        var n = java.text.Normalizer.normalize(base, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+            .replace(Regex("[^A-Za-z0-9._-]+"), "_")
+            .replace(Regex("\\.{2,}"), ".")
+            .trim('_', '.', '-')
+        if (n.isEmpty()) n = "entrega"
+        if (!n.lowercase().endsWith(".zip")) n += ".zip"
+        return n
+    }
+
     data class Result(val ok: Boolean, val message: String, val htmlUrl: String? = null)
 
     fun deliver(
-        ctx: Context, project: Project, fileName: String, bytes: ByteArray,
+        ctx: Context, project: Project, rawFileName: String, bytes: ByteArray,
         onStatus: (String) -> Unit,
         onSteps: (String) -> Unit = {},
         onDone: (Boolean, String?, File?) -> Unit = { _, _, _ -> },
@@ -37,6 +50,7 @@ object GitHubDelivery {
         Thread {
             try {
                 val t0 = System.currentTimeMillis()
+                val fileName = safeName(rawFileName)
                 val token = Projects.token(ctx)
                 if (token.isBlank()) {
                     onStatus("Configure o token do GitHub em Configurações")
@@ -55,7 +69,7 @@ object GitHubDelivery {
                 onStatus("Enviando $fileName → ${project.fullRepo()}/$path ($branch)…")
                 val put = putFile(token, project, branch, path, bytes, "Entrega automática: $fileName")
                 if (!put.ok) {
-                    onStatus(put.message)
+                    onStatus(put.message + "\nCaminho: $path")
                     notify(ctx, "Falha no envio", put.message, put.htmlUrl)
                     onDone(false, put.htmlUrl, null)
                     return@Thread
