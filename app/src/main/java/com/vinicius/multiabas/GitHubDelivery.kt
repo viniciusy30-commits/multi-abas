@@ -92,7 +92,8 @@ object GitHubDelivery {
                         val apk = downloadLatestApk(ctx, token, project, onStatus, 6 * 60 * 1000L, onProgress)
                         if (apk != null) {
                             onStatus("APK pronto ✓")
-                            notifyInstall(ctx, project, apk)
+                            val started = AutoInstall.enabled(ctx) && AutoInstall.install(ctx, apk, project.name)
+                            if (started) onStatus("Instalando a atualização…") else notifyInstall(ctx, project, apk)
                             onDone(true, run.html, apk)
                         } else {
                             onStatus("Build OK, mas não achei APK na release")

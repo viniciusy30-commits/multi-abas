@@ -1,10 +1,17 @@
+#id 2026-10-25-d
+#titulo Atualização automática do jogo
+- Quando o build termina, o app já baixa o APK e abre a instalação sozinho
+- No Android 12 ou mais novo, pode atualizar o jogo sem nenhum toque
+- Ajustes: interruptor "Instalar o jogo sozinho"
+- O app procura atualização dele mesmo a cada 20 minutos
+
 #id 2026-10-25-c
 #titulo Continuar em outra conta
 - O app guarda a conversa do Claude em tempo real (a cada ~15s), uma por aba
 - Quando aparecer o aviso de limite, ele oferece continuar em outra conta
 - Menu → Continuar em outra conta (ou segure a aba): monta um ZIP com a conversa, o log de entregas e o código atual do projeto
 - Abre um chat novo na outra conta, já com a mensagem pronta e o ZIP anexado
-- Salva o chat completo: blocos abertos, imagens, links e uma cópia em HTML (menu → Salvar chat completo, ou junto da continuação)
+- Salva o chat completo: blocos abertos, imagens, links e uma cópia em HTML (tudo no botão Continuar em outra conta)
 - Anexa o ZIP direto na página da outra conta
 - Ajustes: interruptor "Salvar andamento do Claude"
 

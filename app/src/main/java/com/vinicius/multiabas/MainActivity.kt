@@ -554,8 +554,7 @@ class MainActivity : AppCompatActivity() {
             Tile(R.drawable.ic_settings, "Ajustes") { settings() }
         ))
         sh.section("Limite acabou?")
-        sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Leva o projeto e a conversa para outra aba") { manualHandoff() }
-        sh.row(R.drawable.ic_download, "Salvar chat completo", "ZIP com a conversa inteira, imagens e links") { startHandoff(tabs[cur], null) }
+        sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Salva o chat completo, imagens e código num ZIP e leva para outra aba") { manualHandoff() }
         sh.show()
     }
 
@@ -577,6 +576,10 @@ class MainActivity : AppCompatActivity() {
             R.drawable.ic_code, "Salvar andamento do Claude", "Guarda a conversa em tempo real para continuar em outra conta",
             prefs.getBoolean("handoff_auto", true)
         ) { on -> prefs.edit().putBoolean("handoff_auto", on).apply(); say(if (on) "Andamento sendo salvo" else "Andamento pausado") }
+        sh.switchRow(
+            R.drawable.ic_download, "Instalar o jogo sozinho", "Quando o build terminar, já abre a instalação da nova versão",
+            prefs.getBoolean("auto_install", true)
+        ) { on -> prefs.edit().putBoolean("auto_install", on).apply(); say(if (on) "Instalação automática ligada" else "Instalação automática desligada") }
         sh.row(R.drawable.ic_download, "Verificar atualização", "Procura uma versão nova do app") { Updater.check(this, true) }
         sh.row(R.drawable.ic_info, "O que mudou", "Novidades desta versão") { Novidades.show(this, true) }
         sh.show()
@@ -631,7 +634,8 @@ class MainActivity : AppCompatActivity() {
         Thread {
             val apk = GitHubDelivery.downloadLatestApk(this, token, p, { popup.status(it) }, 20_000L) { popup.progress(it) }
             if (apk != null) {
-                popup.status("APK pronto ✓")
+                val started = AutoInstall.install(this, apk, p.name)
+                popup.status(if (started) "APK pronto ✓ Instalando…" else "APK pronto ✓")
                 popup.done(true, null, apk)
             } else {
                 popup.status("Não achei APK na última release ✗")
@@ -1507,6 +1511,7 @@ return 'none';})();"""
 
     override fun onResume() {
         super.onResume()
+        Updater.autoCheck(this)
         handler.post(ticker)
         if (prefs.getBoolean("keepalive", true)) KeepAliveService.start(this)
     }

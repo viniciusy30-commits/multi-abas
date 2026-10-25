@@ -25,6 +25,9 @@
             android:name=".InstallReceiverActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <receiver
+            android:name=".InstallResultReceiver"
+            android:exported="false" />
         <service
             android:name=".KeepAliveService"
             android:exported="false"

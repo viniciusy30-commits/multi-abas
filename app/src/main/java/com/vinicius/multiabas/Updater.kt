@@ -20,7 +20,7 @@ object Updater {
     fun autoCheck(a: Activity) {
         val p = a.getSharedPreferences("upd", 0)
         val now = System.currentTimeMillis()
-        if (now - p.getLong("last", 0) < 6 * 3600 * 1000L) return
+        if (now - p.getLong("last", 0) < 20 * 60 * 1000L) return
         p.edit().putLong("last", now).apply()
         check(a, false)
     }
