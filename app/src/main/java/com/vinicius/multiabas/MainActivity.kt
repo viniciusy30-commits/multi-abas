@@ -455,10 +455,10 @@ class MainActivity : AppCompatActivity() {
             val br = if (it.branch.isBlank()) "auto" else it.branch
             labels.add("$mark${it.name}  (${it.fullRepo()} · $br/${it.folder})")
         }
-        labels.add("+ Novo projeto")
+        labels.add("+ Adicionar do GitHub…")
         AlertDialog.Builder(this).setTitle("Projeto atual")
             .setItems(labels.toTypedArray()) { _, w ->
-                if (w == list.size) editProject(-1)
+                if (w == list.size) pickRepoFromGitHub()
                 else {
                     Projects.setCurrentId(this, list[w].id)
                     Toast.makeText(this, "Projeto: ${list[w].name}", Toast.LENGTH_SHORT).show()
@@ -466,6 +466,94 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton("Fechar", null).show()
+    }
+
+    /** Lista os repositórios da sua conta e preenche tudo automaticamente. */
+    private fun pickRepoFromGitHub() {
+        val token = Projects.token(this)
+        if (token.isBlank()) {
+            Toast.makeText(this, "Configure o Token do GitHub em Configurações primeiro", Toast.LENGTH_LONG).show()
+            editToken()
+            return
+        }
+        Toast.makeText(this, "Carregando repositórios…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val repos = GitHubRepos.listMyRepos(token)
+                runOnUiThread {
+                    if (repos.isEmpty()) {
+                        Toast.makeText(this, "Nenhum repositório encontrado (confira o token)", Toast.LENGTH_LONG).show()
+                        return@runOnUiThread
+                    }
+                    val labels = repos.map { r ->
+                        val d = if (r.description.isNotBlank()) " — ${r.description.take(40)}" else ""
+                        "${r.name}$d"
+                    }.toTypedArray()
+                    AlertDialog.Builder(this).setTitle("Escolha o repositório")
+                        .setItems(labels) { _, w ->
+                            val r = repos[w]
+                            Toast.makeText(this, "Detectando package de ${r.name}…", Toast.LENGTH_SHORT).show()
+                            Thread {
+                                val pkg = try {
+                                    GitHubRepos.detectPackage(token, r.owner, r.name, r.defaultBranch)
+                                } catch (_: Exception) { "" }
+                                val hasInc = try {
+                                    GitHubRepos.hasIncoming(token, r.owner, r.name, r.defaultBranch)
+                                } catch (_: Exception) { false }
+                                runOnUiThread {
+                                    addProjectFromRepo(r, pkg, hasInc)
+                                }
+                            }.start()
+                        }
+                        .setNegativeButton("Cancelar", null).show()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Erro ao listar: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun addProjectFromRepo(r: GitHubRepos.RepoInfo, pkg: String, hasIncoming: Boolean) {
+        val list = Projects.load(this)
+        // se já existe o mesmo repo, só seleciona
+        val existing = list.indexOfFirst { it.owner == r.owner && it.repo == r.name }
+        if (existing >= 0) {
+            Projects.setCurrentId(this, list[existing].id)
+            if (pkg.isNotBlank() && list[existing].packageName.isBlank()) {
+                list[existing].packageName = pkg
+                Projects.save(this, list)
+            }
+            Toast.makeText(this, "Já cadastrado — projeto atual: ${list[existing].name}", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val p = Project(
+            id = System.currentTimeMillis().toString(),
+            name = r.name,
+            owner = r.owner,
+            repo = r.name,
+            branch = r.defaultBranch,
+            folder = "_incoming",
+            packageName = pkg
+        )
+        list.add(p)
+        Projects.save(this, list)
+        Projects.setCurrentId(this, p.id)
+        val extra = buildString {
+            append("Projeto ${p.name} pronto")
+            if (pkg.isNotBlank()) append("\nPackage: $pkg")
+            else append("\nPackage não detectado (pode editar depois)")
+            if (!hasIncoming) append("\nObs: pasta _incoming não encontrada — o workflow precisa dela")
+        }
+        AlertDialog.Builder(this).setTitle("Projeto adicionado")
+            .setMessage(extra)
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Editar") { _, _ ->
+                val idx = Projects.load(this).indexOfFirst { it.id == p.id }
+                if (idx >= 0) editProject(idx)
+            }
+            .show()
     }
 
     private fun projectOptions(i: Int) {

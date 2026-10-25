@@ -1,3 +1,8 @@
+#id 2026-10-24-c
+#titulo Projetos pelo GitHub
+- Ao adicionar projeto, escolhe o repositório na lista da sua conta
+- Branch, package e pasta _incoming são preenchidos sozinhos
+
 #id 2026-10-24-b
 #titulo Atualizar e abrir o jogo
 - Depois do build OK, o app baixa o APK da release e avisa para instalar
