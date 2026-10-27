@@ -1,3 +1,19 @@
+#id 2026-10-27-d
+#titulo Corrige o erro do build sozinho
+- Se o build no GitHub falhar, o app pega o erro do log, copia e manda no chat do Claude como arquivo .txt
+- O Claude corrige, o app baixa o ZIP corrigido e entrega ao GitHub de novo, sozinho
+- Repete até o build passar (máximo de 6 tentativas seguidas) e avisa quando passou
+- Dá para desligar em Ajustes → Corrigir erro do build sozinho
+
+#id 2026-10-27-c
+#titulo Script mais paciente com anexos
+- O Script espera o chat novo carregar de verdade antes de anexar
+- Confere cada anexo na caixa (e se terminou de subir) e só então escreve e envia a tarefa
+- Sem tempo máximo: segue no instante em que tudo está pronto; se um anexo demorar, ele tenta de novo sozinho
+- Fecha sozinho avisos que atrapalham: novidades/atualização do app e janelas do Claude (menos o aviso de limite, que o app precisa ler)
+- Se o limite aparecer enquanto prepara o envio, ele troca de conta em vez de ficar esperando
+- Vale também ao continuar em outra conta
+
 #id 2026-10-27-b
 #titulo Uso estimado para contas free
 - Contas free não têm barra de uso: o app agora estima o % de cada conta pelo que acontece nos chats

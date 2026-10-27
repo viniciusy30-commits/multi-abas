@@ -61,6 +61,50 @@ class ScriptRunner(private val a: MainActivity) {
         if (f == null) text
         else "(Tarefa grande: o texto completo está no arquivo anexo ${f.name}. Leia o arquivo inteiro e faça exatamente o que está nele.)"
 
+    // ───────────── guarda: fecha avisos que atrapalham ─────────────
+
+    private var guardOn = false
+    private var lastLimitChk = 0L
+    private var lastDismissTxt = ""
+
+    private fun startGuard() {
+        if (guardOn) return
+        guardOn = true
+        h.post(object : Runnable {
+            override fun run() {
+                if (Script.status != Script.RUNNING) { guardOn = false; return }
+                try { guardTick() } catch (_: Exception) { }
+                h.postDelayed(this, 1200)
+            }
+        })
+    }
+
+    private fun guardTick() {
+        val n = a.scrDismissAppDialogs()
+        if (n > 0) Script.log(a, "Fechei um aviso do app que apareceu sozinho")
+        if (phase != Phase.SENDING && phase != Phase.WAIT_DONE && phase != Phase.GET_ZIP) return
+        val tab = a.scrTab(Script.chatTabId) ?: return
+        val w = a.scrWeb(tab) ?: return
+        val g = gen
+        w.evaluateJavascript(ScriptJs.CLEAR) { raw ->
+            if (g != gen) return@evaluateJavascript
+            val o = try { JSONObject(Handoff.unquote(raw) ?: "{}") } catch (_: Exception) { JSONObject() }
+            val t = o.optString("t")
+            if (o.optInt("n", 0) > 0 && t != lastDismissTxt) {
+                lastDismissTxt = t
+                Script.log(a, "Fechei um aviso do Claude: ${t.ifBlank { "janela" }}")
+            }
+        }
+        // enquanto prepara o envio, um limite pode aparecer e travar tudo: confere de tempos em tempos
+        val now = System.currentTimeMillis()
+        if (phase == Phase.SENDING && now - lastLimitChk > 4000L) {
+            lastLimitChk = now
+            a.scrSnap(tab) { snap, active ->
+                if (g == gen && snap != null && snap.limit && active) onLimit()
+            }
+        }
+    }
+
     // ───────────── controles ─────────────
 
     fun start() {
@@ -94,6 +138,7 @@ class ScriptRunner(private val a: MainActivity) {
         acquireWake()
         KeepAliveService.start(a)
         Handoff.log(a, Projects.current(a)!!.id, "Script iniciado: $total tarefa(s)")
+        startGuard()
         beginTask()
     }
 
@@ -119,6 +164,7 @@ class ScriptRunner(private val a: MainActivity) {
         limitBusy = false
         acquireWake()
         KeepAliveService.start(a)
+        startGuard()
         if (taskSent) {
             sentAt = System.currentTimeMillis()
             enterWait(false)
@@ -156,6 +202,7 @@ class ScriptRunner(private val a: MainActivity) {
         chatStarted = true
         taskSent = true
         acquireWake()
+        startGuard()
         status("Retomando depois de reabrir o app…")
         try { a.scrWebOpen(tab) } catch (_: Exception) { }
         h.postDelayed({
@@ -214,29 +261,63 @@ class ScriptRunner(private val a: MainActivity) {
                 w.evaluateJavascript(ScriptJs.FILL.replace("__TEXT__", JSONObject.quote(text))) { r ->
                     if (!ok()) return@evaluateJavascript
                     if (r?.contains("ok") != true) { failPause("Não achei a caixa de mensagem do Claude"); return@evaluateJavascript }
-                    w.postDelayed({ readBase(w) { trySend(w, 0, g) } }, 1500)
+                    w.postDelayed({ readBase(w) { trySend(w, 0, g) } }, 300)
                 }
             }
-            fun attachNext(i: Int) {
+            // só escreve/envia depois de TODOS os anexos estarem na caixa e terminados de enviar;
+            // sem tempo máximo: segue no instante em que tudo está pronto
+            var attachNext: (Int) -> Unit = { _ -> }
+            fun verify(n: Int, stable: Int) {
                 if (!ok()) return
-                if (i >= attach.size) { fill(); return }
-                status("Anexando ${attach[i].name}…")
-                a.scrAttach(tab, attach[i]) { done ->
-                    if (!ok()) return@scrAttach
-                    if (!done) failPause("Não consegui anexar ${attach[i].name} no Claude") else attachNext(i + 1)
+                a.scrAttachedOk(w, attach.map { it.name }) { good ->
+                    if (!ok()) return@scrAttachedOk
+                    val st = if (good) stable + 1 else 0
+                    if (st >= 2) { status("Anexos prontos. Escrevendo…"); fill(); return@scrAttachedOk }
+                    if (n > 0 && n % 40 == 0) {
+                        // faz tempo sem aparecer: reanexa só o que ainda não está na página
+                        Script.log(a, "Anexo ainda não apareceu; anexando de novo o que falta")
+                        fun again(i: Int) {
+                            if (!ok()) return
+                            if (i >= attach.size) { verify(n + 1, 0); return }
+                            a.scrAttachedOk(w, listOf(attach[i].name), false) { has ->
+                                if (!ok()) return@scrAttachedOk
+                                if (has) again(i + 1)
+                                else a.scrAttach(tab, attach[i]) { _ -> w.postDelayed({ again(i + 1) }, 500) }
+                            }
+                        }
+                        again(0)
+                        return@scrAttachedOk
+                    }
+                    w.postDelayed({ verify(n + 1, st) }, 500)
+                }
+            }
+            attachNext = { i ->
+                if (ok()) {
+                    if (i >= attach.size) {
+                        status("Conferindo os anexos…")
+                        verify(0, 0)
+                    } else {
+                        status("Anexando ${attach[i].name}…")
+                        a.scrAttach(tab, attach[i]) { done ->
+                            if (ok()) {
+                                // falhou? tenta de novo logo em seguida, sem desistir
+                                if (!done) w.postDelayed({ attachNext(i) }, 800) else attachNext(i + 1)
+                            }
+                        }
+                    }
                 }
             }
             attachNext(0)
         }
         if (newChat) {
             status("Abrindo um chat novo…")
-            a.scrOpenNew(tab) { ready ->
+            a.scrOpenNew(tab, { ok() }) { ready ->
                 if (!ok()) return@scrOpenNew
                 if (!ready) failPause("O Claude não abriu o chat (a conta está logada?)") else afterOpen()
             }
         } else {
-            a.scrWaitComposer(a.scrWebOpen(tab), 20) { ready ->
-                if (!ok()) return@scrWaitComposer
+            a.scrWaitReady(a.scrWebOpen(tab), null, { ok() }) { ready ->
+                if (!ok()) return@scrWaitReady
                 if (!ready) failPause("A caixa de mensagem do Claude não apareceu") else afterOpen()
             }
         }
@@ -255,10 +336,9 @@ class ScriptRunner(private val a: MainActivity) {
             if (g != gen || Script.status != Script.RUNNING) return@evaluateJavascript
             if (raw?.contains("sent") == true) {
                 confirmSent(w, 0, g)
-            } else if (n < 14) {
-                w.postDelayed({ trySend(w, n + 1, g) }, 1500)
             } else {
-                failPause("Não consegui apertar o botão de enviar do Claude")
+                // o botão pode estar desativado até o upload acabar: tenta de novo, sem limite
+                w.postDelayed({ trySend(w, n + 1, g) }, 500)
             }
         }
     }

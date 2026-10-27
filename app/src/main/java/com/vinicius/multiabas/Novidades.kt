@@ -16,7 +16,7 @@ object Novidades {
             p.edit().putString("seen", id).apply()
             val title = lines.firstOrNull { it.startsWith("#titulo ") }?.removePrefix("#titulo ") ?: "O que mudou"
             val body = lines.filter { it.startsWith("- ") }.joinToString("\n") { "• " + it.removePrefix("- ") }
-            MaterialAlertDialogBuilder(a).setTitle(title).setMessage(body).setPositiveButton("Legal", null).show()
+            MaterialAlertDialogBuilder(a).setTitle(title).setMessage(body).setPositiveButton("Legal", null).show().also { (a as? MainActivity)?.trackDlg(it) }
         } catch (e: Exception) { }
     }
 }

@@ -122,7 +122,7 @@ class MainActivity : AppCompatActivity() {
                     fileCb?.onReceiveValue(null)
                     fileCb = null
                 }
-                .show()
+                .show().also { trackDlg(it) }
             true
         } catch (_: Exception) {
             fileCb = null
@@ -613,6 +613,10 @@ class MainActivity : AppCompatActivity() {
             R.drawable.ic_download, "Instalar o jogo sozinho", "Quando o build terminar, já abre a instalação da nova versão",
             prefs.getBoolean("auto_install", true)
         ) { on -> prefs.edit().putBoolean("auto_install", on).apply(); say(if (on) "Instalação automática ligada" else "Instalação automática desligada") }
+        sh.switchRow(
+            R.drawable.ic_refresh, "Corrigir erro do build sozinho", "Se o build falhar, manda o erro ao Claude, baixa o ZIP corrigido e entrega de novo (até ${AutoFix.MAX} vezes)",
+            prefs.getBoolean("autofix", true)
+        ) { on -> prefs.edit().putBoolean("autofix", on).apply(); say(if (on) "Correção automática ligada" else "Correção automática desligada") }
         sh.row(R.drawable.ic_download, "Verificar atualização", "Procura uma versão nova do app") { Updater.check(this, true) }
         sh.row(R.drawable.ic_info, "O que mudou", "Novidades desta versão") { Novidades.show(this, true) }
         sh.show()
@@ -706,17 +710,28 @@ class MainActivity : AppCompatActivity() {
             say("ZIP salvo. Configure o Token do GitHub em Configurações.", true)
             return
         }
+        autoFix.onZipDownloaded()
+        val guessTab = tabs.getOrNull(cur)?.takeIf { webs[it.id]?.url?.contains("claude.ai") == true }?.id ?: Script.chatTabId
+        val fixTab = autoFix.tabFor(guessTab)
         val popup = BuildPopup(this, proj.name)
         popup.show()
         popup.status("Enviando $zipName → ${proj.name}…")
         Handoff.log(this, proj.id, "ZIP enviado: $zipName")
+        var failLog = ""
         GitHubDelivery.deliver(
             this, proj, zipName, bytes,
             onStatus = { popup.status(it) },
             onSteps = { popup.steps(it) },
+            onFailLog = {
+                failLog = it
+                if (autoFix.enabled()) popup.status("Build falhou ✗ — copiando o erro e mandando para o Claude…")
+            },
             onDone = { ok, url, apk ->
                 Handoff.log(this, proj.id, "$zipName → " + if (ok) "build OK, APK pronto" else "build falhou ou sem APK")
                 popup.done(ok, url, apk)
+                if (ok) autoFix.onBuildOk(proj.id)
+                else if (failLog.isNotBlank()) runOnUiThread { autoFix.start(proj, zipName, failLog, url, fixTab) }
+                else autoFix.cancel()
             }
         )
     }
@@ -899,7 +914,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage("A conta \"${t.name}\" parece ter chegado ao limite. Quer continuar o projeto em outra conta? O app leva a conversa e o código atual.")
             .setPositiveButton("Continuar") { _, _ -> chooseTarget(t) }
             .setNegativeButton("Agora não", null)
-            .show()
+            .show().also { trackDlg(it) }
     }
 
     private fun manualHandoff() {
@@ -941,6 +956,23 @@ class MainActivity : AppCompatActivity() {
         else -> if (Script.items.isEmpty()) "Monte uma lista de tarefas e deixe rodar sozinho" else "${Script.items.size} tarefa(s) na lista"
     }
 
+    // ── avisos do próprio app que podem aparecer sozinhos e atrapalhar o Script ──
+    private val autoDlgs = ArrayList<java.lang.ref.WeakReference<android.app.Dialog>>()
+    internal fun trackDlg(d: android.app.Dialog?) { if (d != null) autoDlgs.add(java.lang.ref.WeakReference(d)) }
+
+    /** Fecha os avisos do app que apareceram sozinhos (novidades, atualização, "limite atingido?", escolha de anexo). */
+    internal fun scrDismissAppDialogs(): Int {
+        var n = 0
+        val it = autoDlgs.iterator()
+        while (it.hasNext()) {
+            val d = it.next().get()
+            if (d == null) { it.remove(); continue }
+            if (d.isShowing) { try { d.cancel(); n++ } catch (_: Exception) { } }
+            it.remove()
+        }
+        return n
+    }
+
     internal fun scrHandler() = handler
     internal fun scrTabs(): List<Tab> = tabs.toList()
     internal fun scrTab(id: String): Tab? = tabs.firstOrNull { it.id == id }
@@ -965,11 +997,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Abre um chat novo na aba e espera a caixa de mensagem aparecer. */
-    internal fun scrOpenNew(t: Tab, cb: (Boolean) -> Unit) {
+    internal fun scrOpenNew(t: Tab, alive: () -> Boolean = { true }, cb: (Boolean) -> Unit) {
         val w = webFor(t)
-        t.holdUntil = System.currentTimeMillis() + 25_000L
+        t.holdUntil = System.currentTimeMillis() + 20_000L
         w.loadUrl("https://claude.ai/new")
-        w.postDelayed({ waitComposer(w, 25, cb) }, 2500)
+        scrWaitReady(w, "claude.ai/new", alive, cb)
+    }
+
+    /**
+     * Espera a página ficar pronta, sem tempo máximo: URL certa (se pedida), carregamento em 100%,
+     * página completa e caixa de mensagem presente em 2 leituras seguidas. Assim que fica pronta, segue.
+     * Só desiste se o Script for parado (alive() = false).
+     */
+    internal fun scrWaitReady(w: WebView, urlPart: String?, alive: () -> Boolean, cb: (Boolean) -> Unit) {
+        var stable = 0
+        fun check() {
+            if (!alive()) return
+            val urlOk = urlPart == null || (w.url ?: "").contains(urlPart)
+            val loaded = w.progress >= 100
+            w.evaluateJavascript("(function(){return document.readyState==='complete'&&document.querySelector('div[contenteditable=\"true\"]')?'yes':'no';})();") { r ->
+                if (!alive()) return@evaluateJavascript
+                if (urlOk && loaded && r?.contains("yes") == true) stable++ else stable = 0
+                if (stable >= 2) { cb(true); return@evaluateJavascript }
+                w.postDelayed({ check() }, 400)
+            }
+        }
+        w.postDelayed({ check() }, 400)
+    }
+
+    /** Os nomes estão na página? (checkBusy: e nenhum envio de arquivo em andamento) */
+    internal fun scrAttachedOk(w: WebView, names: List<String>, checkBusy: Boolean = true, cb: (Boolean) -> Unit) {
+        val arr = JSONArray(names.map { if (it.length > 30) it.substring(0, 30) else it }).toString()
+        val busy = if (checkBusy)
+            "var e=document.querySelector('div[contenteditable=\"true\"]');var p=e;for(var k=0;k<6&&p&&p.parentElement;k++)p=p.parentElement;" +
+            "if(p&&p.querySelector('[role=progressbar],.animate-spin,[aria-busy=true]'))return 'busy';"
+        else ""
+        val js = "(function(ns){var t=document.body.innerText||'';for(var i=0;i<ns.length;i++){if(t.indexOf(ns[i])<0)return 'no';}" +
+            busy + "return 'yes';})($arr);"
+        w.evaluateJavascript(js) { r -> cb(r?.contains("yes") == true) }
     }
 
     /** Lê a página da aba (guarda a conversa e atualiza o limite). cb(leitura, contaEmLimiteAgora). */
@@ -1003,6 +1068,7 @@ class MainActivity : AppCompatActivity() {
     // ───────────── Uso das contas (0–100%) ─────────────
 
     internal val usageMon: UsageMonitor by lazy { UsageMonitor(this) }
+    internal val autoFix: AutoFix by lazy { AutoFix(this) }
 
     private fun usageSub(): String {
         val parts = tabs.mapNotNull { t ->
@@ -1293,11 +1359,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun tryInject(w: WebView, name: String, mode: String, cb: (Boolean) -> Unit) {
         w.evaluateJavascript(Handoff.INJECT_JS.replace("__MODE__", mode), null)
-        w.postDelayed({
+        fun look(n: Int) {
             w.evaluateJavascript("(function(n){return document.body.innerText.indexOf(n)>=0?'yes':'no';})(" + JSONObject.quote(name) + ");") { r ->
-                cb(r?.contains("yes") == true)
+                if (r?.contains("yes") == true) cb(true)
+                else if (n <= 0) cb(false)
+                else w.postDelayed({ look(n - 1) }, 1000)
             }
-        }, 2500)
+        }
+        w.postDelayed({ look(9) }, 2000)
     }
 
     private val FIND_PLUS_JS = """(function(){

@@ -54,7 +54,7 @@ object Updater {
         MaterialAlertDialogBuilder(a).setTitle("Nova versão disponível")
             .setMessage("Versão 1.$v pronta para instalar.")
             .setPositiveButton("Atualizar") { _, _ -> download(a, url) }
-            .setNegativeButton("Depois", null).show()
+            .setNegativeButton("Depois", null).show().also { (a as? MainActivity)?.trackDlg(it) }
     }
 
     private fun download(a: Activity, url: String) {

@@ -45,7 +45,8 @@ object GitHubDelivery {
         onStatus: (String) -> Unit,
         onSteps: (String) -> Unit = {},
         onDone: (Boolean, String?, File?) -> Unit = { _, _, _ -> },
-        onProgress: (Int) -> Unit = {}
+        onProgress: (Int) -> Unit = {},
+        onFailLog: (String) -> Unit = {}
     ) {
         Thread {
             try {
@@ -104,6 +105,8 @@ object GitHubDelivery {
                     "failure", "cancelled", "timed_out" -> {
                         onStatus("Build falhou ✗")
                         notify(ctx, "Build falhou ✗", "${project.name}: veja o log", run.html)
+                        val log = try { failureLog(token, project, run.id) } catch (_: Exception) { "" }
+                        if (log.isNotBlank()) onFailLog(log)
                         onDone(false, run.html, null)
                     }
                     else -> {
@@ -269,7 +272,7 @@ object GitHubDelivery {
         return true
     }
 
-    private data class RunInfo(val status: String, val html: String?)
+    private data class RunInfo(val status: String, val html: String?, val id: Long = 0L)
 
     private fun resolveBranch(token: String, p: Project): String {
         if (p.branch.isNotBlank()) return p.branch
@@ -359,7 +362,7 @@ object GitHubDelivery {
                             Thread.sleep(4000)
                             continue
                         }
-                        return RunInfo(if (conclusion.isBlank()) "completed" else conclusion, html)
+                        return RunInfo(if (conclusion.isBlank()) "completed" else conclusion, html, best.optLong("id"))
                     }
                 }
             }
@@ -435,6 +438,78 @@ object GitHubDelivery {
         } catch (_: Exception) {
             null
         }
+    }
+
+    /** Texto simples de um endereço da API (segue o redirecionamento do log sem mandar o token adiante). */
+    private fun apiGetText(token: String, path: String): String? {
+        return try {
+            val c = URL("$API$path").openConnection() as HttpURLConnection
+            c.instanceFollowRedirects = false
+            c.connectTimeout = 15000
+            c.readTimeout = 30000
+            c.setRequestProperty("Accept", "application/vnd.github+json")
+            c.setRequestProperty("Authorization", "Bearer $token")
+            c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            var code = c.responseCode
+            var conn = c
+            if (code in 300..399) {
+                val loc = c.getHeaderField("Location") ?: return null
+                c.disconnect()
+                conn = URL(loc).openConnection() as HttpURLConnection
+                conn.connectTimeout = 15000
+                conn.readTimeout = 30000
+                code = conn.responseCode
+            }
+            if (code !in 200..299) return null
+            conn.inputStream.bufferedReader().readText()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Pega do log do build só o que importa (erros do compilador / Gradle), pronto para mandar ao Claude. */
+    fun failureLog(token: String, p: Project, runId: Long): String {
+        if (runId <= 0L) return ""
+        val jobs = apiGet(token, "/repos/${p.fullRepo()}/actions/runs/$runId/jobs")?.optJSONArray("jobs") ?: return ""
+        val out = StringBuilder()
+        for (i in 0 until jobs.length()) {
+            val j = jobs.getJSONObject(i)
+            val concl = j.optString("conclusion")
+            if (concl != "failure" && concl != "cancelled" && concl != "timed_out") continue
+            val steps = j.optJSONArray("steps")
+            var failedStep = ""
+            if (steps != null) for (k in 0 until steps.length()) {
+                val s = steps.getJSONObject(k)
+                if (s.optString("conclusion") == "failure") { failedStep = s.optString("name"); break }
+            }
+            val raw = apiGetText(token, "/repos/${p.fullRepo()}/actions/jobs/${j.optLong("id")}/logs") ?: continue
+            out.append("=== Job: ").append(j.optString("name")).append(if (failedStep.isNotBlank()) " · passo que falhou: $failedStep" else "").append(" ===\n")
+            out.append(extractErrors(raw)).append("\n\n")
+        }
+        return out.toString().trim()
+    }
+
+    private fun extractErrors(raw: String): String {
+        val lines = raw.lines().map { it.replace(Regex("^\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z\\s?"), "") }
+        val keep = java.util.LinkedHashSet<String>()
+        var i = 0
+        while (i < lines.size) {
+            val l = lines[i]
+            val low = l.lowercase()
+            val hit = l.startsWith("e: ") || l.contains("error:") || l.contains("FAILURE:") || l.contains("Execution failed") ||
+                l.contains("What went wrong") || l.contains(" FAILED") || low.contains("exception") && !low.contains("at ") ||
+                l.contains("##[error]") || l.contains("Process completed with exit code")
+            if (hit) {
+                keep.add(l.trim())
+                if (l.contains("What went wrong") || l.contains("Execution failed")) {
+                    for (k in 1..4) { if (i + k < lines.size && lines[i + k].isNotBlank()) keep.add(lines[i + k].trim()) }
+                }
+            }
+            i++
+        }
+        val picked = if (keep.isEmpty()) lines.takeLast(120).joinToString("\n")
+        else keep.take(260).joinToString("\n") + (if (keep.size > 260) "\n… (mais ${keep.size - 260} linhas de erro)" else "")
+        return picked.take(30_000)
     }
 
     private fun actionsUrl(p: Project) = "https://github.com/${p.fullRepo()}/actions"
