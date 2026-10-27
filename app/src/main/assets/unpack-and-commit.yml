@@ -1,0 +1,52 @@
+name: Unpack and commit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '_incoming/*.zip'
+      - '_incoming/**/*.zip'
+
+permissions:
+  contents: write
+
+# uma entrega por vez; quem esperar pega a main mais nova e processa todos os ZIPs que sobraram
+concurrency:
+  group: unpack-and-commit
+  cancel-in-progress: false
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Extract zips
+        run: |
+          set -e
+          while IFS= read -r z; do
+            echo "Extraindo $z"
+            unzip -o "$z" -d . -x '.github/*' '__MACOSX/*'
+            rm -f "$z"
+          done < <(find _incoming -type f -name '*.zip' | sort)
+
+      - name: Commit
+        run: |
+          git config user.name "entrega-bot"
+          git config user.email "entrega-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nada para commitar"
+            exit 0
+          fi
+          git commit -m "Entrega automática"
+          for i in 1 2 3 4 5 6; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push recusado (outra entrega chegou antes); tentando de novo ($i/6)"
+            sleep $((i * 4))
+          done
+          exit 1

@@ -1,3 +1,8 @@
+#id 2026-10-27-f
+#titulo Entrega que não trava
+- Se duas entregas chegarem juntas, o ZIP não fica mais preso no GitHub
+- O app atualiza sozinho o workflow de entrega na próxima vez que enviar um ZIP (precisa do token com permissão workflow)
+
 #id 2026-10-27-e
 #titulo Anexo do Script mais confiável
 - A conferência do anexo olha só ao redor do próprio arquivo (antes podia ficar presa)
