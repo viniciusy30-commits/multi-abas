@@ -42,8 +42,9 @@ var rest=body;
 seen.forEach(function(n){ try{ rest=rest.replace(n.innerText,''); }catch(e){} });
 rest=rest.slice(-1500);
 var re=/sem\s+mensagens|mensagens\s+gratuitas|(you.?ve|you have)\s+(reached|hit)\s+(your|the)\b.{0,50}limit|usage limit|limit\s+(will\s+)?reset|resets?\s+(at|in|on)\s|atingiu\s+o\s+limite|limite\s.{0,40}(redefin|reinici|volt|renov)|volta(r[áa])?\s.{0,20}\d/i;
-var tm=rest.match(/at[ée]\s+(\d{1,2}):(\d{2})/i);
-return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:re.test(rest),h:tm?(tm[1]+':'+tm[2]):''});
+var mm=re.exec(rest);
+var ctx=mm?rest.substr(mm.index,240).replace(/\s+/g,' ').trim():'';
+return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:!!mm,h:ctx});
 }catch(e){return JSON.stringify({t:'',u:'',x:'',l:false});}})();"""
 
     data class Snap(val title: String, val url: String, val text: String, val limit: Boolean, val until: String = "")

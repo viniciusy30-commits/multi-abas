@@ -1,3 +1,11 @@
+#id 2026-10-26-a
+#titulo Selos, abas separadas e limite corrigido
+- Selo nas abas: segure a aba → Selo do projeto. Use o ícone ou a capa de um repositório do GitHub, ou uma foto da galeria
+- Abas separadas em Liberadas e Em recarga (as em recarga ficam em ordem de quem volta primeiro)
+- Corrigido: o limite não vai mais para o dia seguinte quando o horário do aviso já passou
+- Quando a recarga termina, o app avisa e recarrega a aba para sumir o aviso antigo
+- O horário de volta agora entende 17:00, 5pm, 17h30, "em 2 horas" e dia da semana
+
 #id 2026-10-25-e
 #titulo Colar texto grande
 - Menu → Colar texto grande: cole qualquer texto, o app vira um arquivo .txt e anexa no chat da aba

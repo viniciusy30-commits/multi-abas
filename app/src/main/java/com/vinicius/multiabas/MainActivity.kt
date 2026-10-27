@@ -25,7 +25,12 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONObject
 
-class Tab(val id: String, var name: String, var url: String, var until: Long = 0L)
+class Tab(val id: String, var name: String, var url: String, var until: Long = 0L) {
+    /** Trecho do aviso de limite já tratado (evita recalcular o mesmo aviso a cada 15s). */
+    var limitSrc: String = ""
+    /** Até quando ignorar o aviso da página (logo depois de recarregar a aba). */
+    var holdUntil: Long = 0L
+}
 
 class MainActivity : AppCompatActivity() {
     private val HOME = "https://claude.ai"
@@ -48,6 +53,21 @@ class MainActivity : AppCompatActivity() {
     private val favAdapter = FavAdapter()
     private var favWeb: WebView? = null
     private val limitAsked = HashSet<String>()
+    /** limitSrc = CLEARED → o usuário mexeu no limite à mão; ignora o aviso da página até ele sumir. */
+    private val CLEARED = "#manual"
+    private var badgeTabId: String? = null
+    private val badgePicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val id = badgeTabId
+        badgeTabId = null
+        if (uri != null && id != null) {
+            Thread {
+                val ok = Badges.saveFromUri(this, id, uri)
+                runOnUiThread {
+                    if (ok) { refreshRows(); say("Selo definido") } else say("Não consegui usar essa imagem", true)
+                }
+            }.start()
+        }
+    }
     private lateinit var overlay: View
     private lateinit var favHost: FrameLayout
     private lateinit var favTitle: TextView
@@ -215,7 +235,7 @@ class MainActivity : AppCompatActivity() {
             val a = JSONArray(prefs.getString("tabs", "[]"))
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                tabs.add(Tab(o.getString("id"), o.getString("name"), o.getString("url"), o.optLong("until", 0L)))
+                tabs.add(Tab(o.getString("id"), o.getString("name"), o.getString("url"), o.optLong("until", 0L)).also { it.limitSrc = o.optString("limitSrc", "") })
             }
         } catch (e: Exception) { }
         if (tabs.isEmpty()) tabs.add(newTab("Conta 1"))
@@ -224,7 +244,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun save() {
         val a = JSONArray()
-        tabs.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url).put("until", it.until)) }
+        tabs.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url).put("until", it.until).put("limitSrc", it.limitSrc)) }
         prefs.edit().putString("tabs", a.toString()).putInt("cur", cur).apply()
     }
 
@@ -432,8 +452,8 @@ class MainActivity : AppCompatActivity() {
         w.animate().alpha(1f).setDuration(180).start()
         setUrlText(t.url)
         progress.visibility = View.GONE
-        adapter.notifyDataSetChanged()
-        rv.scrollToPosition(i)
+        refreshRows()
+        scrollToTab(t)
         save()
     }
 
@@ -505,16 +525,17 @@ class MainActivity : AppCompatActivity() {
         val t = tabs[i]
         val sh = Sheet(this).title(t.name, "Conta separada, com login e cookies próprios")
         sh.row(R.drawable.ic_edit, "Renomear") {
-            input("Renomear aba", t.name) { t.name = it; adapter.notifyDataSetChanged(); save() }
+            input("Renomear aba", t.name) { t.name = it; refreshRows(); save() }
         }
         sh.row(R.drawable.ic_refresh, "Recarregar") { webs[t.id]?.reload() }
+        sh.row(R.drawable.ic_star, "Selo do projeto", if (Badges.has(this, t.id)) "Trocar ou remover o selo desta aba" else "Põe a foto de um projeto do GitHub na aba") { badgeOptions(t) }
         sh.row(R.drawable.ic_send, "Continuar em outra conta", "Leva o projeto e a conversa desta aba") { chooseTarget(t) }
         sh.row(R.drawable.ic_timer, "Definir volta do limite", "Mostra um cronômetro na aba") {
             val idx = tabs.indexOf(t)
             if (idx >= 0) pickLimit(idx)
         }
         if (t.until > 0L) {
-            sh.row(R.drawable.ic_close, "Limpar limite") { t.until = 0L; save(); tickNow() }
+            sh.row(R.drawable.ic_close, "Limpar limite") { t.until = 0L; t.limitSrc = CLEARED; save(); tickNow() }
         }
         sh.row(R.drawable.ic_delete, "Fechar aba", "O login dessa aba será apagado", danger = true) {
             confirm("Fechar \"${t.name}\"?", "O login dessa aba será apagado.", "Fechar") {
@@ -527,6 +548,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeTab(i: Int) {
         val t = tabs.removeAt(i)
+        Badges.clear(this, t.id)
+        coolingIds.remove(t.id)
         webs.remove(t.id)?.let { container.removeView(it); it.destroy() }
         try { if (profilesOk) ProfileStore.getInstance().deleteProfile("p_" + t.id) } catch (e: Exception) { }
         if (tabs.isEmpty()) tabs.add(newTab("Conta 1"))
@@ -819,34 +842,40 @@ class MainActivity : AppCompatActivity() {
             val w = webs[t.id] ?: continue
             val u = w.url ?: continue
             if (!u.contains("claude.ai")) continue
+            if (System.currentTimeMillis() < t.holdUntil) continue
             w.evaluateJavascript(Handoff.CAPTURE_JS) { raw ->
                 val snap = Handoff.parse(raw)
                 if (snap != null) {
                     Handoff.save(this, t.id, snap)
                     if (snap.limit) {
-                        applyLimitTime(t, snap.until)
-                        if (limitAsked.add(t.id)) offerHandoff(t)
-                    } else limitAsked.remove(t.id)
+                        val active = applyLimitTime(t, snap.until)
+                        if (active && limitAsked.add(t.id)) offerHandoff(t)
+                    } else {
+                        limitAsked.remove(t.id)
+                        if (t.limitSrc.isNotEmpty()) { t.limitSrc = ""; save() }
+                    }
                 }
             }
         }
     }
 
-    /** Lê o "até 05:40" do aviso do Claude e preenche o cronômetro da aba. */
-    private fun applyLimitTime(t: Tab, hhmm: String) {
-        try {
-            if (hhmm.isBlank() || t.until > System.currentTimeMillis()) return
-            val h = hhmm.substringBefore(':').toInt()
-            val m = hhmm.substringAfter(':').toInt()
-            val c = java.util.Calendar.getInstance()
-            c.set(java.util.Calendar.HOUR_OF_DAY, h)
-            c.set(java.util.Calendar.MINUTE, m)
-            c.set(java.util.Calendar.SECOND, 0)
-            c.set(java.util.Calendar.MILLISECOND, 0)
-            if (c.timeInMillis <= System.currentTimeMillis()) c.add(java.util.Calendar.DAY_OF_YEAR, 1)
-            t.until = c.timeInMillis
-            save(); tickNow()
-        } catch (_: Exception) { }
+    /**
+     * Lê o horário do aviso do Claude e preenche o cronômetro da aba.
+     * Devolve true se a conta está mesmo em limite agora.
+     * O mesmo aviso não é recalculado: antes, quando o horário passava e o aviso continuava na tela,
+     * o app empurrava o limite para o dia seguinte.
+     */
+    private fun applyLimitTime(t: Tab, src: String): Boolean {
+        if (t.limitSrc == CLEARED) return false
+        val now = System.currentTimeMillis()
+        val key = src.trim()
+        if (key.isNotEmpty() && key == t.limitSrc) return t.until > now
+        val at = LimitTime.parse(key, now)
+        return when (at) {
+            LimitTime.UNKNOWN -> true
+            LimitTime.PASSED -> { t.limitSrc = key; t.until = 0L; save(); tickNow(); false }
+            else -> { t.limitSrc = key; t.until = at; save(); tickNow(); true }
+        }
     }
 
     private fun offerHandoff(t: Tab) {
@@ -880,13 +909,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val now = System.currentTimeMillis()
-        val labels = others.map {
-            it.name + if (it.until > now) "  ·  limite até " + java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(it.until)) else "  ·  liberada"
-        }.toTypedArray()
+        // liberadas primeiro; em recarga por ordem de quem volta antes
+        val sorted = others.sortedWith(compareBy<Tab>({ if (it.until > now) 1 else 0 }, { if (it.until > now) it.until else 0L }))
+        val labels = sorted.map { limitLabel(it, now) }.toTypedArray()
         if (Handoff.chatInfo(this, from.id) == null) say("Sem conversa salva nesta aba — vai só o código do projeto.", true)
         MaterialAlertDialogBuilder(this)
             .setTitle("Continuar em qual conta?")
-            .setItems(labels) { _, which -> startHandoff(from, others[which]) }
+            .setItems(labels) { _, which -> startHandoff(from, sorted[which]) }
             .setNegativeButton("Cancelar", null)
             .show()
     }
@@ -1623,12 +1652,42 @@ return 'none';})();"""
     }
 
     private fun tickNow() {
+        val now = System.currentTimeMillis()
+        // contas que acabaram de voltar
+        val freed = tabs.filter { it.id in coolingIds && it.until <= now }
+        for (t in freed) { coolingIds.remove(t.id); onTabFreed(t) }
+        tabs.filter { it.until > now }.forEach { coolingIds.add(it.id) }
+        // mudou quem está liberada / em recarga → reagrupa
+        if (sigNow(now) != rowsSig) refreshRows()
         for (k in 0 until rv.childCount) {
             val v = rv.getChildAt(k)
             val p = rv.getChildAdapterPosition(v)
             val h = rv.getChildViewHolder(v) as? TabAdapter.VH ?: continue
-            if (p >= 0 && p < tabs.size) h.bindStatus(tabs[p])
+            val r = rows.getOrNull(p) as? Row.Item ?: continue
+            h.bindStatus(r.tab)
         }
+    }
+
+    private fun onTabFreed(t: Tab) {
+        say("\"${t.name}\" liberada ✓", true)
+        // limite detectado pelo aviso da página: recarrega para o aviso velho sumir
+        if (t.limitSrc.isNotEmpty() && t.limitSrc != CLEARED) {
+            t.limitSrc = ""
+            t.holdUntil = System.currentTimeMillis() + 20_000L
+            save()
+            val w = webs[t.id]
+            if (w != null && (w.url ?: "").contains("claude.ai")) w.reload()
+        }
+    }
+
+    private fun limitLabel(t: Tab, now: Long): String {
+        if (t.until <= now) return "✓  ${t.name}  ·  liberada"
+        val left = t.until - now
+        val h = left / 3_600_000L
+        val m = (left % 3_600_000L) / 60_000L
+        val at = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(t.until))
+        val falta = if (h > 0) "${h}h${m.toString().padStart(2, '0')}" else "${m}min"
+        return "⏳  ${t.name}  ·  volta às $at (falta $falta)"
     }
 
     private fun fmt(ms: Long): String {
@@ -1646,15 +1705,17 @@ return 'none';})();"""
             t.set(java.util.Calendar.MILLISECOND, 0)
             if (t.timeInMillis <= System.currentTimeMillis()) t.add(java.util.Calendar.DAY_OF_YEAR, 1)
             tabs[i].until = t.timeInMillis
+            tabs[i].limitSrc = CLEARED
             save(); tickNow()
         }, c.get(java.util.Calendar.HOUR_OF_DAY), c.get(java.util.Calendar.MINUTE), true).show()
     }
 
-    inner class TabAdapter : RecyclerView.Adapter<TabAdapter.VH>() {
+    inner class TabAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         inner class VH(val v: View) : RecyclerView.ViewHolder(v) {
             val av: TextView = v.findViewById(R.id.tabAvatar)
             val name: TextView = v.findViewById(R.id.tabName)
             val st: TextView = v.findViewById(R.id.tabStatus)
+            val badge: ImageView = v.findViewById(R.id.tabBadge)
             fun bindStatus(t: Tab) {
                 if (t.until <= 0L) { st.visibility = View.GONE; return }
                 st.visibility = View.VISIBLE
@@ -1663,16 +1724,160 @@ return 'none';})();"""
                 else { st.text = fmt(left); st.setTextColor(Color.parseColor("#E0A58F")) }
             }
         }
-        override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_conta, p, false))
-        override fun getItemCount() = tabs.size
-        override fun onBindViewHolder(h: VH, i: Int) {
-            h.name.text = tabs[i].name
-            Ui.avatar(h.av, tabs[i].name)
-            h.v.isSelected = i == cur
-            h.name.setTextColor(if (i == cur) Color.WHITE else Color.parseColor("#B0B6C3"))
-            h.bindStatus(tabs[i])
-            h.v.setOnClickListener { select(h.bindingAdapterPosition) }
-            h.v.setOnLongClickListener { tabOptions(h.bindingAdapterPosition); true }
+        inner class HeadVH(val box: LinearLayout, val label: TextView) : RecyclerView.ViewHolder(box)
+
+        override fun getItemViewType(position: Int) = if (rows.getOrNull(position) is Row.Head) 1 else 0
+        override fun getItemCount() = rows.size
+
+        override fun onCreateViewHolder(p: ViewGroup, type: Int): RecyclerView.ViewHolder {
+            if (type == 1) {
+                val box = LinearLayout(p.context)
+                box.gravity = android.view.Gravity.CENTER_VERTICAL
+                box.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)).apply { marginEnd = dp(8) }
+                val tv = TextView(p.context)
+                tv.textSize = 10.5f
+                tv.letterSpacing = 0.06f
+                tv.setTypeface(tv.typeface, android.graphics.Typeface.BOLD)
+                tv.setPadding(dp(10), dp(5), dp(10), dp(5))
+                box.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                return HeadVH(box, tv)
+            }
+            return VH(layoutInflater.inflate(R.layout.item_conta, p, false))
         }
+
+        override fun onBindViewHolder(h: RecyclerView.ViewHolder, i: Int) {
+            val row = rows.getOrNull(i) ?: return
+            if (h is HeadVH && row is Row.Head) {
+                val color = Color.parseColor(if (row.free) "#4ADE80" else "#E0A58F")
+                h.label.text = (if (row.free) "LIBERADAS" else "EM RECARGA") + " · " + row.count
+                h.label.setTextColor(color)
+                h.label.background = Ui.shape(this@MainActivity, (0x22 shl 24) or (color and 0xFFFFFF), 12)
+                return
+            }
+            if (h !is VH || row !is Row.Item) return
+            val t = row.tab
+            h.name.text = t.name
+            Ui.avatar(h.av, t.name)
+            val bmp = Badges.get(this@MainActivity, t.id)
+            if (bmp != null) { h.badge.setImageBitmap(bmp); h.badge.visibility = View.VISIBLE }
+            else { h.badge.setImageDrawable(null); h.badge.visibility = View.GONE }
+            val sel = tabs.indexOf(t) == cur
+            h.v.isSelected = sel
+            h.name.setTextColor(if (sel) Color.WHITE else Color.parseColor("#B0B6C3"))
+            h.bindStatus(t)
+            h.v.setOnClickListener { val idx = tabs.indexOf(t); if (idx >= 0) select(idx) }
+            h.v.setOnLongClickListener { val idx = tabs.indexOf(t); if (idx >= 0) tabOptions(idx); true }
+        }
+    }
+
+    // ───────────── Abas: liberadas × em recarga ─────────────
+
+    private sealed class Row {
+        class Head(val free: Boolean, val count: Int) : Row()
+        class Item(val tab: Tab) : Row()
+    }
+    private var rows: List<Row> = emptyList()
+    private var rowsSig = ""
+    private val coolingIds = HashSet<String>()
+
+    private fun sigNow(now: Long) = tabs.joinToString("|") { it.id + (if (it.until > now) "c" else "f") }
+
+    /** Liberadas primeiro (na ordem em que você criou); em recarga depois, de quem volta antes para quem volta depois. */
+    private fun buildRows(now: Long): List<Row> {
+        val free = tabs.filter { it.until <= now }
+        val cool = tabs.filter { it.until > now }.sortedBy { it.until }
+        val out = ArrayList<Row>()
+        val split = free.isNotEmpty() && cool.isNotEmpty()
+        if (split) out.add(Row.Head(true, free.size))
+        free.forEach { out.add(Row.Item(it)) }
+        if (split) out.add(Row.Head(false, cool.size))
+        cool.forEach { out.add(Row.Item(it)) }
+        return out
+    }
+
+    private fun refreshRows() {
+        val now = System.currentTimeMillis()
+        rows = buildRows(now)
+        rowsSig = sigNow(now)
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun scrollToTab(t: Tab) {
+        val pos = rows.indexOfFirst { it is Row.Item && it.tab === t }
+        if (pos >= 0) rv.scrollToPosition(pos)
+    }
+
+    // ───────────── Selo da aba ─────────────
+
+    private fun badgeOptions(t: Tab) {
+        val sh = Sheet(this).title("Selo da aba", "Marca \"${t.name}\" com a foto de um projeto")
+        val list = Projects.load(this)
+        if (list.isNotEmpty()) sh.section("Seus projetos")
+        list.forEach { p ->
+            sh.row(R.drawable.ic_code, p.name, p.fullRepo()) { chooseBadgeSource(t, p.owner, p.repo, p.branch) }
+        }
+        sh.section("Outras opções")
+        sh.row(R.drawable.ic_folder, "Outro repositório do GitHub", "Lista todos os seus repositórios") { pickBadgeRepo(t) }
+        sh.row(R.drawable.ic_add, "Foto da galeria", "Qualquer imagem do celular") {
+            badgeTabId = t.id
+            try {
+                badgePicker.launch(
+                    androidx.activity.result.PickVisualMediaRequest.Builder()
+                        .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly).build()
+                )
+            } catch (_: Exception) { badgeTabId = null; say("Não consegui abrir a galeria", true) }
+        }
+        if (Badges.has(this, t.id)) {
+            sh.row(R.drawable.ic_delete, "Remover selo", danger = true) {
+                Badges.clear(this, t.id); refreshRows(); say("Selo removido")
+            }
+        }
+        sh.show()
+    }
+
+    private fun chooseBadgeSource(t: Tab, owner: String, repo: String, branch: String) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Qual imagem de $repo?")
+            .setItems(arrayOf("Ícone do app (automático)", "Imagem de capa do repositório")) { _, which ->
+                fetchBadge(t, owner, repo, branch, which == 1)
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun fetchBadge(t: Tab, owner: String, repo: String, branch: String, cover: Boolean) {
+        val token = Projects.token(this)
+        say("Baixando a imagem de $repo…")
+        Thread {
+            val bmp = try { Badges.fetchForRepo(token, owner, repo, branch, cover) } catch (_: Exception) { null }
+            val ok = bmp != null && Badges.save(this, t.id, bmp)
+            runOnUiThread {
+                if (ok) { refreshRows(); say("Selo definido em \"${t.name}\"") }
+                else say("Não achei imagem em $repo. Tente a capa ou a galeria.", true)
+            }
+        }.start()
+    }
+
+    private fun pickBadgeRepo(t: Tab) {
+        val token = Projects.token(this)
+        if (token.isBlank()) {
+            say("Configure o Token do GitHub primeiro", true)
+            editToken()
+            return
+        }
+        say("Carregando repositórios…")
+        Thread {
+            val repos = try { GitHubRepos.listMyRepos(token) } catch (_: Exception) { emptyList() }
+            runOnUiThread {
+                if (repos.isEmpty()) { say("Nenhum repositório encontrado (confira o token)", true); return@runOnUiThread }
+                val sh = Sheet(this).title("Escolha o repositório", "${repos.size} encontrados na sua conta")
+                repos.forEach { r ->
+                    sh.row(R.drawable.ic_code, r.name, r.description.ifBlank { null }) {
+                        chooseBadgeSource(t, r.owner, r.name, r.defaultBranch)
+                    }
+                }
+                sh.show()
+            }
+        }.start()
     }
 }
