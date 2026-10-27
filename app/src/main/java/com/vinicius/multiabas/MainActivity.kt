@@ -220,6 +220,7 @@ class MainActivity : AppCompatActivity() {
         if (!profilesOk) say("Seu WebView não separa contas. Atualize o \"Android System WebView\" na Play Store.", true)
         select(cur)
         Script.load(this)
+        Usage.load(this)
         if (Script.status == Script.RUNNING) scr.resumeAfterRestart()
         Updater.autoCheck(this)
         Novidades.show(this, false)
@@ -580,6 +581,7 @@ class MainActivity : AppCompatActivity() {
         ))
         sh.section("Automação")
         sh.row(R.drawable.ic_play, "Script de tarefas", scriptSub(), highlighted = Script.status == Script.RUNNING) { scr.ui.showPanel() }
+        sh.row(R.drawable.ic_timer, "Uso das contas (0–100%)", usageSub()) { usageMon.ui.show() }
         sh.section("Limite acabou?")
         sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Salva o chat completo, imagens e código num ZIP e leva para outra aba") { manualHandoff() }
         sh.section("Texto grande")
@@ -994,6 +996,37 @@ class MainActivity : AppCompatActivity() {
         if (Script.status != Script.DONE || Script.resultShown) return
         if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         scr.ui.showResults()
+    }
+
+    // ───────────── Uso das contas (0–100%) ─────────────
+
+    internal val usageMon: UsageMonitor by lazy { UsageMonitor(this) }
+
+    private fun usageSub(): String {
+        val parts = tabs.mapNotNull { t ->
+            val i = Usage.map[t.id]
+            if (i == null || i.err.isNotEmpty() || i.s < 0) null else "${t.name} ${i.s}%"
+        }
+        return if (parts.isEmpty()) "Veja quanto cada conta já usou, ao vivo" else parts.joinToString(" · ")
+    }
+
+    /** WebView escondida com o mesmo login da aba, só para ler a página de uso. */
+    internal fun scrProbe(t: Tab): WebView {
+        val w = WebView(this)
+        if (profilesOk) { try { WebViewCompat.setProfile(w, "p_" + t.id) } catch (e: Exception) { } }
+        val s = w.settings
+        s.javaScriptEnabled = true
+        s.domStorageEnabled = true
+        s.allowFileAccess = false
+        s.userAgentString = s.userAgentString.replace("; wv", "").replace(Regex("Version/\\d+\\.\\d+ "), "")
+        CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
+        w.alpha = 0f
+        findViewById<ViewGroup>(android.R.id.content).addView(w, FrameLayout.LayoutParams(1, 1))
+        return w
+    }
+
+    internal fun scrProbeDone(w: WebView) {
+        try { (w.parent as? ViewGroup)?.removeView(w); w.destroy() } catch (_: Exception) { }
     }
 
     // ───────────── Colar texto grande → arquivo → anexo no Claude ─────────────
@@ -1814,10 +1847,10 @@ return 'none';})();"""
                 st.visibility = View.VISIBLE
                 val left = t.until - System.currentTimeMillis()
                 if (t.until <= 0L || left <= 0L) {
-                    st.text = "Liberado"; st.setTextColor(Color.parseColor("#4ADE80"))
+                    st.text = "Liberado" + Usage.chip(t.id); st.setTextColor(Color.parseColor("#4ADE80"))
                     ret.visibility = View.GONE
                 } else {
-                    st.text = fmt(left); st.setTextColor(Color.parseColor("#E0A58F"))
+                    st.text = fmt(left) + Usage.chip(t.id); st.setTextColor(Color.parseColor("#E0A58F"))
                     ret.text = returnLabel(t.until)
                     ret.visibility = View.VISIBLE
                 }

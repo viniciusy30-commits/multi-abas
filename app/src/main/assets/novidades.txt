@@ -6,6 +6,7 @@
 - Só para quando termina a lista; aí mostra todos os ZIPs com botão para enviar ao GitHub (juntos ou um por um)
 - Separe várias tarefas de uma vez com uma linha contendo só ---
 - Prompts grandes (mais de 8 mil caracteres) vão como arquivo .txt anexado, sem travar o chat
+- Uso das contas: cada aba com barra de 0 a 100% (sessão de 5 h e semana), lida da página de uso do Claude e atualizada sozinha; o % também aparece na etiqueta da aba
 - Relatório ao vivo: acompanhe cada tarefa, os arquivos de cada ZIP e a linha do tempo, atualizando sozinho
 
 #id 2026-10-26-a

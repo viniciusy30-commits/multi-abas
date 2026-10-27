@@ -39,6 +39,8 @@ class ScriptRunner(private val a: MainActivity) {
     private var dlStart = 0L
     private var noneCount = 0
     private var lastSnapAt = 0L
+    private var lastUsageAt = 0L
+    private val warned = HashSet<String>()
     private var limitBusy = false
     private var wake: PowerManager.WakeLock? = null
 
@@ -307,6 +309,17 @@ class ScriptRunner(private val a: MainActivity) {
         val w = tab?.let { a.scrWeb(it) }
         if (tab == null || w == null) { poll(g); return }
         val now = System.currentTimeMillis()
+        // uso das contas: relê a cada 4 min e avisa no relatório quando passa de 90%
+        if (now - lastUsageAt > 240_000L) {
+            lastUsageAt = now
+            a.usageMon.refreshAll {
+                a.scrTabs().forEach { t ->
+                    val i = Usage.map[t.id]
+                    if (i != null && i.s >= 90 && warned.add(t.id)) Script.log(a, "Conta \"${t.name}\" em ${i.s}% da sessão")
+                    if (i != null && i.s in 0..60) warned.remove(t.id)
+                }
+            }
+        }
         // limite?
         if (now - lastSnapAt > 20_000L) {
             lastSnapAt = now
