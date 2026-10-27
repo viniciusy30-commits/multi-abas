@@ -990,10 +990,20 @@ class MainActivity : AppCompatActivity() {
         captureFull(w, progress, cb)
 
     internal fun scrAttach(t: Tab, f: java.io.File, cb: (Boolean) -> Unit) {
+        // o caminho principal (injetar o arquivo na página) não precisa do FileProvider: se ele recusar a pasta,
+        // registra o motivo e segue com um Uri simples (usado só no último recurso, o seletor de arquivos)
+        val uri = try {
+            androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f)
+        } catch (e: Exception) {
+            Script.log(this, "FileProvider recusou ${f.name}: ${(e.message ?: e.javaClass.simpleName).take(90)}")
+            Uri.fromFile(f)
+        }
         try {
-            val uri = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f)
             attachZip(t, f, uri, cb)
-        } catch (_: Exception) { cb(false) }
+        } catch (e: Exception) {
+            Script.log(this, "Erro ao anexar ${f.name}: ${(e.message ?: e.javaClass.simpleName).take(90)}")
+            cb(false)
+        }
     }
 
     /** Abre um chat novo na aba e espera a caixa de mensagem aparecer. */
