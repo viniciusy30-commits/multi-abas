@@ -269,11 +269,14 @@ class ScriptRunner(private val a: MainActivity) {
             var attachNext: (Int) -> Unit = { _ -> }
             fun verify(n: Int, stable: Int) {
                 if (!ok()) return
-                a.scrAttachedOk(w, attach.map { it.name }) { good ->
-                    if (!ok()) return@scrAttachedOk
+                a.scrAttachState(w, attach.map { it.name }) { stt ->
+                    if (!ok()) return@scrAttachState
+                    val good = stt == "yes"
                     val st = if (good) stable + 1 else 0
-                    if (st >= 2) { status("Anexos prontos. Escrevendo…"); fill(); return@scrAttachedOk }
-                    if (n > 0 && n % 40 == 0) {
+                    if (!good) status(if (stt == "busy") "Anexo subindo… aguardando terminar" else "Conferindo os anexos… (ainda não apareceram na página)")
+                    if (n == 24 && !good) Script.log(a, "Anexo ainda não confirmado após 12 s (estado: $stt)")
+                    if (st >= 2) { status("Anexos prontos. Escrevendo…"); fill(); return@scrAttachState }
+                    if (n > 0 && n % 30 == 0 && stt == "no") {
                         // faz tempo sem aparecer: reanexa só o que ainda não está na página
                         Script.log(a, "Anexo ainda não apareceu; anexando de novo o que falta")
                         fun again(i: Int) {
@@ -286,7 +289,7 @@ class ScriptRunner(private val a: MainActivity) {
                             }
                         }
                         again(0)
-                        return@scrAttachedOk
+                        return@scrAttachState
                     }
                     w.postDelayed({ verify(n + 1, st) }, 500)
                 }

@@ -1,3 +1,8 @@
+#id 2026-10-27-e
+#titulo Anexo do Script mais confiável
+- A conferência do anexo olha só ao redor do próprio arquivo (antes podia ficar presa)
+- O status mostra o que está esperando e o relatório registra por qual caminho o anexo entrou
+
 #id 2026-10-27-d
 #titulo Corrige o erro do build sozinho
 - Se o build no GitHub falhar, o app pega o erro do log, copia e manda no chat do Claude como arquivo .txt
