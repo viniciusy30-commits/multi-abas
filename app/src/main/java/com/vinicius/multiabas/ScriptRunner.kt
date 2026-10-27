@@ -38,7 +38,7 @@ class ScriptRunner(private val a: MainActivity) {
     private var stable = 0
     private var askCount = 0
     private var zipGot = false
-    @Volatile private var packedSha = ""
+    private val sentShas = java.util.Collections.synchronizedSet(HashSet<String>())
     @Volatile private var lastAttachBytes = 0L
     // o Claude já começou a responder? (sem isso, texto parado = ainda nem começou, não "terminou")
     private var sawWork = false
@@ -264,6 +264,8 @@ class ScriptRunner(private val a: MainActivity) {
         phase = Phase.SENDING
         taskSent = false
         lastAttachBytes = attach.sumOf { it.length() }
+        // guarda a assinatura de tudo que o app anexa: se esse arquivo voltar como "entrega", é falso
+        attach.forEach { f -> try { sentShas.add(Script.shaOf(f.readBytes())) } catch (_: Exception) { } }
         fun ok() = g == gen && Script.status == Script.RUNNING
         fun afterOpen() {
             if (!ok()) return
@@ -596,13 +598,33 @@ class ScriptRunner(private val a: MainActivity) {
         }
     }
 
+    /** O ZIP baixado é algo que o PRÓPRIO app mandou ao Claude (código, pacote de continuação)? Então não é entrega. */
+    private fun isOwnZip(name: String, bytes: ByteArray): Boolean {
+        val n = name.trim().lowercase()
+        if (n.startsWith("codigo-") || n.startsWith("continuar-")) return true
+        if (Script.shaOf(bytes) in sentShas) return true
+        try {
+            java.util.zip.ZipInputStream(bytes.inputStream()).use { zi ->
+                var e = zi.nextEntry
+                var count = 0
+                while (e != null && count < 2000) {
+                    val en = e.name.replace('\\', '/').trimStart('/')
+                    if (en == "LEIA-ME-PRIMEIRO.md" || en == "PROGRESSO-DO-SCRIPT.md" ||
+                        en == "conversa-anterior.txt" || en.startsWith("chat-completo/")) return true
+                    count++
+                    e = zi.nextEntry
+                }
+            }
+        } catch (_: Exception) { }
+        return false
+    }
+
     /** Chamado pelo app quando um ZIP é baixado. Devolve true se o script ficou com ele. */
     fun onZip(name: String, bytes: ByteArray): Boolean {
         if (Script.status != Script.RUNNING) return false
         // o ZIP "codigo-<repo>.zip" é o que o PRÓPRIO app mandou ao Claude: nunca é entrega (era isso que
         // fazia o script dar a tarefa como concluída com o código antigo quando o limite acabava)
-        val mine = name.trim().startsWith("codigo-", ignoreCase = true) ||
-            (packedSha.isNotEmpty() && Script.shaOf(bytes) == packedSha)
+        val mine = isOwnZip(name, bytes)
         if (mine) {
             Script.log(a, "ZIP do próprio app ignorado (não é entrega do Claude): $name")
             a.runOnUiThread { a.scrSay("Script: ignorei o ZIP que o app mandou") }
@@ -888,7 +910,7 @@ class ScriptRunner(private val a: MainActivity) {
                 z.closeEntry()
             }
         }
-        packedSha = try { Script.shaOf(out.readBytes()) } catch (_: Exception) { "" }
+        try { sentShas.add(Script.shaOf(out.readBytes())) } catch (_: Exception) { }
         return out
     }
 
