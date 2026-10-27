@@ -1,3 +1,9 @@
+#id 2026-10-27-h
+#titulo Script não dá mais ZIP errado como entregue + medidor mais preciso
+- Corrige: o Script pegava o próprio ZIP do código (codigo-...zip, o que o app manda) como se fosse a entrega do Claude e dava a tarefa como concluída quando o limite acabava. Agora ele ignora esse ZIP e troca de conta para continuar
+- O ZIP só conta se vier DEPOIS da sua mensagem, nunca de anexos; se faltar, o Script continua em outra conta até o Claude entregar de verdade
+- Medidor de uso das contas free: conta o trabalho invisível do Claude (comandos executados, tempo trabalhando e o ZIP anexado) e aprende a capacidade bem mais rápido quando o limite acaba
+
 #id 2026-10-27-g
 #titulo Script continua de onde parou
 - Ao trocar de conta, o Script não repete mais a tarefa do zero: se o ZIP já tinha sido entregue, segue para a próxima

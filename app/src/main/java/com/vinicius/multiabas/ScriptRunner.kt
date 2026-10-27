@@ -38,6 +38,8 @@ class ScriptRunner(private val a: MainActivity) {
     private var stable = 0
     private var askCount = 0
     private var zipGot = false
+    @Volatile private var packedSha = ""
+    @Volatile private var lastAttachBytes = 0L
     // o Claude já começou a responder? (sem isso, texto parado = ainda nem começou, não "terminou")
     private var sawWork = false
     private var n0 = -1
@@ -261,6 +263,7 @@ class ScriptRunner(private val a: MainActivity) {
         val g = gen
         phase = Phase.SENDING
         taskSent = false
+        lastAttachBytes = attach.sumOf { it.length() }
         fun ok() = g == gen && Script.status == Script.RUNNING
         fun afterOpen() {
             if (!ok()) return
@@ -422,6 +425,11 @@ class ScriptRunner(private val a: MainActivity) {
         taskBegan = true
         sentAt = System.currentTimeMillis()
         Script.log(a, "Mensagem enviada ao Claude (tarefa ${Script.idx + 1})")
+        try {
+            val bytes = lastAttachBytes
+            lastAttachBytes = 0L
+            if (bytes > 0L) Est.addAttachment(a, Script.chatTabId, bytes)
+        } catch (_: Exception) { }
         enterWait(true)
     }
 
@@ -591,6 +599,15 @@ class ScriptRunner(private val a: MainActivity) {
     /** Chamado pelo app quando um ZIP é baixado. Devolve true se o script ficou com ele. */
     fun onZip(name: String, bytes: ByteArray): Boolean {
         if (Script.status != Script.RUNNING) return false
+        // o ZIP "codigo-<repo>.zip" é o que o PRÓPRIO app mandou ao Claude: nunca é entrega (era isso que
+        // fazia o script dar a tarefa como concluída com o código antigo quando o limite acabava)
+        val mine = name.trim().startsWith("codigo-", ignoreCase = true) ||
+            (packedSha.isNotEmpty() && Script.shaOf(bytes) == packedSha)
+        if (mine) {
+            Script.log(a, "ZIP do próprio app ignorado (não é entrega do Claude): $name")
+            a.runOnUiThread { a.scrSay("Script: ignorei o ZIP que o app mandou") }
+            return true
+        }
         val item = Script.idx
         val z = Script.addZip(a, item, name, bytes)
         a.runOnUiThread {
@@ -871,6 +888,7 @@ class ScriptRunner(private val a: MainActivity) {
                 z.closeEntry()
             }
         }
+        packedSha = try { Script.shaOf(out.readBytes()) } catch (_: Exception) { "" }
         return out
     }
 

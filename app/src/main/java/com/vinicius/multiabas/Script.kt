@@ -135,6 +135,8 @@ object Script {
 
     fun zipFile(ctx: Context, z: ScriptZip) = File(dir(ctx), z.file)
 
+    fun shaOf(b: ByteArray): String = sha(b)
+
     private fun sha(b: ByteArray): String =
         MessageDigest.getInstance("SHA-1").digest(b).joinToString("") { "%02x".format(it) }
 
@@ -202,7 +204,7 @@ object Script {
         "Vou te passar uma lista de $total tarefa(s) para o projeto anexado (ZIP com o código atual), uma por vez.\n\n" +
         "Regras:\n" +
         "1) Faça somente a tarefa que eu enviar em cada mensagem.\n" +
-        "2) Ao terminar cada tarefa, entregue o resultado como UM ZIP pronto para baixar, com os arquivos alterados/novos na estrutura do projeto (caminhos a partir da raiz do repositório). Nunca código para copiar e colar: eu só uso o celular.\n" +
+        "2) Ao terminar cada tarefa, entregue o resultado como UM ZIP pronto para baixar (NUNCA com nome começando em \"codigo-\": esse é o nome do ZIP que eu te mandei; use outro nome, ex.: entrega-tarefa-N.zip), com os arquivos alterados/novos na estrutura do projeto (caminhos a partir da raiz do repositório). Nunca código para copiar e colar: eu só uso o celular.\n" +
         "3) As tarefas se acumulam: se um arquivo já foi alterado numa tarefa anterior desta conversa, o ZIP da nova tarefa deve conter a versão COMPLETA dele, com todas as mudanças.\n" +
         "4) Os ZIPs não são aplicados ao repositório durante a lista; eu aplico tudo no final, em ordem.\n" +
         "5) Não faça perguntas se não for essencial: decida e siga em frente. Responda curto, sem repetir o código no chat.\n\n" +
@@ -367,19 +369,21 @@ if(last.contains(el))return true;
 if(thread&&thread.contains(el)&&(last.compareDocumentPosition(el)&2))return true;
 return false;}
 function inThread(el){return !!(thread&&thread.contains(el));}
+function before(el){return !!last&&!(last.compareDocumentPosition(el)&4);}
+function mine(n){return /(^|[\s(])codigo-[^\s]*\.zip/i.test(n||'');}
 var els=document.querySelectorAll('a[download],a[href],button,[role="button"],[role="menuitem"]');
 for(var i=els.length-1;i>=0;i--){var el=els[i];
-if(old(el))continue;
+if(old(el)||before(el))continue;
 var lb=lab(el);
 if(!lb||lb.length>80||!re.test(lb))continue;
 if(us.length>1&&!inThread(el)&&!st.opened)continue;
 var nm=cardName(el)||(/\.zip/i.test(lb)?lb:'')||st.open||'';
-if(!nm)continue;
+if(!nm||mine(nm))continue;
 var key='d|'+nm;if(st.done[key])continue;
 st.done[key]=1;el.click();
 return JSON.stringify({a:'dl',n:nm});}
 for(var j=els.length-1;j>=0;j--){var e2=els[j];
-if(old(e2))continue;
+if(old(e2)||before(e2))continue;
 var l2=lab(e2);
 if(!l2||l2.length>120||!/\.zip\b/i.test(l2))continue;
 var k2='o|'+l2;if(st.done[k2])continue;
