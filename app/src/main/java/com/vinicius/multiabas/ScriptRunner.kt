@@ -36,6 +36,10 @@ class ScriptRunner(private val a: MainActivity) {
     private var stable = 0
     private var askCount = 0
     private var zipGot = false
+    // o Claude já começou a responder? (sem isso, texto parado = ainda nem começou, não "terminou")
+    private var sawWork = false
+    private var n0 = -1
+    private var sentN = -1
     private var dlStart = 0L
     private var noneCount = 0
     private var lastSnapAt = 0L
@@ -346,7 +350,33 @@ class ScriptRunner(private val a: MainActivity) {
         }
     }
 
+    private var streamWaitSince = 0L
+
+    /** Trava: nunca envia por cima de uma resposta em andamento (o envio viraria "parar"/interromperia o Claude). */
     private fun trySend(w: android.webkit.WebView, n: Int, g: Int) {
+        if (g != gen || Script.status != Script.RUNNING) return
+        w.evaluateJavascript(ScriptJs.STATE) { st ->
+            if (g != gen || Script.status != Script.RUNNING) return@evaluateJavascript
+            val o = try { JSONObject(Handoff.unquote(st) ?: "{}") } catch (_: Exception) { JSONObject() }
+            if (o.optBoolean("s", false)) {
+                val now = System.currentTimeMillis()
+                if (streamWaitSince == 0L) {
+                    streamWaitSince = now
+                    Script.log(a, "Claude ainda está respondendo; esperando acabar antes de enviar")
+                    status("Claude ainda está respondendo… aguardando antes de enviar")
+                }
+                if (now - streamWaitSince < 30 * 60_000L) {
+                    w.postDelayed({ trySend(w, n, g) }, 1500)
+                    return@evaluateJavascript
+                }
+                Script.log(a, "Claude respondendo há mais de 30 min; enviando mesmo assim")
+            }
+            streamWaitSince = 0L
+            doSend(w, n, g)
+        }
+    }
+
+    private fun doSend(w: android.webkit.WebView, n: Int, g: Int) {
         if (g != gen || Script.status != Script.RUNNING) return
         w.evaluateJavascript(ScriptJs.SEND) { raw ->
             if (g != gen || Script.status != Script.RUNNING) return@evaluateJavascript
@@ -366,7 +396,7 @@ class ScriptRunner(private val a: MainActivity) {
                     val o = try { JSONObject(Handoff.unquote(r2) ?: "{}") } catch (_: Exception) { JSONObject() }
                     if (o.optInt("e", -1) == 0) {
                         Script.log(a, "Caixa de mensagem vazia: considerando a tarefa ${Script.idx + 1} enviada")
-                        markSent()
+                        markSent(o.optInt("n", -1))
                     } else {
                         w.postDelayed({ trySend(w, n + 1, g) }, 500)
                     }
@@ -378,7 +408,8 @@ class ScriptRunner(private val a: MainActivity) {
         }
     }
 
-    private fun markSent() {
+    private fun markSent(pageLen: Int = -1) {
+        sentN = pageLen
         chatStarted = true
         taskSent = true
         sentAt = System.currentTimeMillis()
@@ -395,7 +426,7 @@ class ScriptRunner(private val a: MainActivity) {
                 val u = o.optInt("u", -1)
                 val s = o.optBoolean("s", false)
                 if (u > baseU || s) {
-                    markSent()
+                    markSent(o.optInt("n", -1))
                 } else if (n < 12) {
                     confirmSent(w, n + 1, g)
                 } else {
@@ -410,6 +441,8 @@ class ScriptRunner(private val a: MainActivity) {
 
     private fun enterWait(fresh: Boolean) {
         phase = Phase.WAIT_DONE
+        sawWork = !fresh          // retomando depois de reabrir/pausar: a resposta pode já estar pronta
+        n0 = if (fresh) sentN else -1
         lastN = -1
         stable = 0
         lastSnapAt = System.currentTimeMillis()
@@ -467,8 +500,16 @@ class ScriptRunner(private val a: MainActivity) {
             } else {
                 if (n == lastN) stable++ else { stable = 0; lastN = n }
             }
+            if (n0 < 0) n0 = n
+            if (!sawWork && (s || n - n0 >= 40)) {
+                sawWork = true
+                Script.log(a, "Claude começou a responder (tarefa ${Script.idx + 1})")
+            }
             val waited = System.currentTimeMillis() - sentAt
-            if (!s && stable >= 4 && waited >= 8000L && u >= baseU + 1) {
+            // se o Claude demora a começar (anexo grande, fila), espera até 3 min antes de achar que acabou
+            val gaveUp = !sawWork && waited >= 180_000L
+            if (!s && (sawWork || gaveUp) && stable >= 4 && waited >= 8000L && u >= baseU + 1) {
+                if (gaveUp) Script.log(a, "Claude não mostrou resposta em 3 min; conferindo o ZIP mesmo assim")
                 enterGetZip(g)
             } else {
                 poll(g)
