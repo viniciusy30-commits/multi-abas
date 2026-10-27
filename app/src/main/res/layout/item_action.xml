@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content" android:layout_height="38dp"
+    android:layout_marginEnd="8dp" android:gravity="center_vertical"
+    android:orientation="horizontal" android:paddingStart="12dp" android:paddingEnd="14dp"
+    android:background="@drawable/bg_fav_chip">
+    <ImageView android:id="@+id/actIcon" android:layout_width="18dp" android:layout_height="18dp"
+        android:tint="@color/accent" />
+    <TextView android:id="@+id/actName" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:layout_marginStart="8dp"
+        android:maxLines="1" android:ellipsize="end" android:maxWidth="130dp"
+        android:textColor="@color/text" android:textSize="13sp" />
+</LinearLayout>

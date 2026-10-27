@@ -313,45 +313,157 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
         return sb.toString()
     }
 
-    fun showReport() {
-        val pad = Ui.dp(a, 16)
-        val bar = ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
-        val head = TextView(a).apply {
-            textSize = 14f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            setTextColor(Ui.color(a, R.color.text))
-        }
-        val tv = TextView(a).apply {
-            textSize = 12.5f
-            setTextColor(Ui.color(a, R.color.text))
-            setTextIsSelectable(true)
-        }
-        val sc = ScrollView(a).apply { addView(tv) }
-        val box = LinearLayout(a).apply {
+    private val expandedZips = HashSet<String>()
+
+    private fun tv(text: String, size: Float, color: Int, bold: Boolean = false, selectable: Boolean = false) = TextView(a).apply {
+        this.text = text
+        textSize = size
+        setTextColor(color)
+        if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+        if (selectable) setTextIsSelectable(true)
+    }
+
+    private fun sectionTitle(t: String, sub: String? = null): View {
+        val l = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, Ui.dp(a, 8), pad, 0)
-            addView(head)
-            addView(bar, LinearLayout.LayoutParams(-1, -2).apply { topMargin = Ui.dp(a, 8); bottomMargin = Ui.dp(a, 8) })
-            addView(sc, LinearLayout.LayoutParams(-1, Ui.dp(a, 420)))
+            setPadding(Ui.dp(a, 2), Ui.dp(a, 16), 0, Ui.dp(a, 6))
+        }
+        l.addView(tv(t, 15f, Ui.color(a, R.color.text), bold = true))
+        if (sub != null) l.addView(tv(sub, 12f, Ui.color(a, R.color.muted)))
+        return l
+    }
+
+    private fun cardBox(stroke: Int = Ui.color(a, R.color.outline)) = LinearLayout(a).apply {
+        orientation = LinearLayout.VERTICAL
+        background = Ui.shape(a, Ui.color(a, R.color.surface), 14, stroke, 1)
+        setPadding(Ui.dp(a, 14), Ui.dp(a, 12), Ui.dp(a, 14), Ui.dp(a, 12))
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = Ui.dp(a, 8) }
+    }
+
+    private fun stateColor(s: Int) = when (s) {
+        Script.OK -> Ui.color(a, R.color.ok)
+        Script.FAIL -> Ui.color(a, R.color.danger)
+        Script.RUN -> Ui.color(a, R.color.accent)
+        else -> Ui.color(a, R.color.muted)
+    }
+
+    /** Monta o relatório em cartões: estado geral, uma ficha por tarefa e a linha do tempo em frases. */
+    private fun renderReport(out: LinearLayout, onToggle: () -> Unit) {
+        out.removeAllViews()
+        val cText = Ui.color(a, R.color.text)
+        val cMuted = Ui.color(a, R.color.muted)
+        val cAccent = Ui.color(a, R.color.accent)
+        val cDanger = Ui.color(a, R.color.danger)
+        val cOk = Ui.color(a, R.color.ok)
+        val hm = SimpleDateFormat("HH:mm", Locale.US)
+        val total = Script.items.size
+        val ok = Script.items.count { it.state == Script.OK }
+        val fail = Script.items.count { it.state == Script.FAIL }
+        val running = Script.status == Script.RUNNING
+        val paused = Script.status == Script.PAUSED
+
+        // ── 1) Situação agora ──
+        val top = cardBox(if (running) cAccent else Ui.color(a, R.color.outline))
+        val dotColor = when (Script.status) { Script.RUNNING -> cAccent; Script.PAUSED -> cDanger; Script.DONE -> cOk; else -> cMuted }
+        top.addView(tv(
+            when (Script.status) {
+                Script.RUNNING -> "● Rodando"
+                Script.PAUSED -> "● Pausado"
+                Script.DONE -> "● Tudo concluído"
+                else -> "● Parado"
+            }, 19f, dotColor, bold = true))
+        if (running || paused) top.addView(tv("Fazendo a tarefa ${Script.idx + 1} de $total", 14f, cText).apply { setPadding(0, Ui.dp(a, 4), 0, 0) })
+        if (running && Script.ui.isNotBlank()) top.addView(tv("Agora: ${Script.ui}", 13f, cMuted).apply { setPadding(0, Ui.dp(a, 2), 0, 0) })
+        if (paused && Script.reason.isNotBlank()) top.addView(tv("Parou porque: ${Script.reason}", 13f, cDanger).apply { setPadding(0, Ui.dp(a, 4), 0, 0) })
+        val done = ok + fail
+        val bar = ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = if (total == 0) 0 else done * 100 / total }
+        top.addView(bar, LinearLayout.LayoutParams(-1, -2).apply { topMargin = Ui.dp(a, 10); bottomMargin = Ui.dp(a, 8) })
+        val chips = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
+        fun chip(t: String, c: Int) = tv(t, 12.5f, c, bold = true).apply { setPadding(0, 0, Ui.dp(a, 14), 0) }
+        chips.addView(chip("✓ $ok prontas", cOk))
+        chips.addView(chip("✗ $fail falhas", if (fail > 0) cDanger else cMuted))
+        chips.addView(chip("📦 ${Script.zips.size} ZIPs", cMuted))
+        top.addView(chips)
+        out.addView(top)
+
+        // ── 2) Tarefas ──
+        out.addView(sectionTitle("Tarefas", "Cada ficha mostra o que foi pedido e o que já foi entregue"))
+        Script.items.forEachIndexed { i, item ->
+            val cur = i == Script.idx && (running || paused) && item.state != Script.OK
+            val c = cardBox(if (cur) cAccent else Ui.color(a, R.color.outline))
+            val sc = stateColor(item.state)
+            val head = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            head.addView(tv("${i + 1}", 13f, Ui.color(a, R.color.on_accent), bold = true).apply {
+                gravity = Gravity.CENTER
+                background = Ui.shape(a, sc, 0, oval = true)
+            }, LinearLayout.LayoutParams(Ui.dp(a, 26), Ui.dp(a, 26)).apply { rightMargin = Ui.dp(a, 10) })
+            head.addView(tv(
+                when {
+                    item.state == Script.OK -> "Concluída"
+                    item.state == Script.FAIL -> "Falhou — o Claude não entregou ZIP"
+                    cur && paused -> "Pausada nesta tarefa"
+                    cur || item.state == Script.RUN -> "Em andamento"
+                    else -> "Na fila (ainda não começou)"
+                }, 13.5f, sc, bold = true))
+            c.addView(head)
+            c.addView(tv(snippet(item.text), 13f, cText).apply { setPadding(0, Ui.dp(a, 6), 0, 0); maxLines = 3 })
+            val zs = Script.zips.filter { it.item == i }
+            if (zs.isEmpty() && item.state == Script.OK) c.addView(tv("Nenhum arquivo entregue", 12f, cMuted).apply { setPadding(0, Ui.dp(a, 6), 0, 0) })
+            zs.forEach { z ->
+                val files = zipCache.getOrPut(z.file) { Script.zipFiles(a, z) }
+                val open = expandedZips.contains(z.file)
+                c.addView(tv("📦 ${z.name} · ${kb(z.size)} · ${files.size} arquivo(s)  ${if (open) "▲" else "▼"}", 12.5f, cAccent, bold = true).apply {
+                    setPadding(0, Ui.dp(a, 8), 0, 0)
+                    setOnClickListener { if (!expandedZips.remove(z.file)) expandedZips.add(z.file); onToggle() }
+                })
+                val shown = if (open) files else files.take(3)
+                shown.forEach { (n, sz) -> c.addView(tv("   • $n (${sizeLabel(sz)})", 12f, cMuted)) }
+                if (!open && files.size > 3) c.addView(tv("   … e mais ${files.size - 3} (toque no ZIP para ver todos)", 12f, cMuted))
+            }
+            out.addView(c)
+        }
+
+        // ── 3) O que aconteceu ──
+        out.addView(sectionTitle("O que aconteceu", "Do mais recente para o mais antigo"))
+        val ev = Script.eventsSnapshot()
+        if (ev.isEmpty()) out.addView(tv("Nada ainda.", 12.5f, cMuted))
+        val cap = 60
+        ev.asReversed().take(cap).forEach {
+            val row = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, Ui.dp(a, 3), 0, Ui.dp(a, 3)) }
+            row.addView(tv(hm.format(Date(it.t)), 12f, cMuted), LinearLayout.LayoutParams(Ui.dp(a, 46), -2))
+            row.addView(tv(it.text, 12.5f, cText), LinearLayout.LayoutParams(0, -2, 1f))
+            out.addView(row)
+        }
+        if (ev.size > cap) out.addView(tv("… mais ${ev.size - cap} registros antigos (use Copiar para ver tudo)", 12f, cMuted).apply { setPadding(0, Ui.dp(a, 6), 0, 0) })
+    }
+
+    fun showReport() {
+        val pad = Ui.dp(a, 14)
+        val list = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
+        val sc = ScrollView(a).apply { addView(list) }
+        val box = LinearLayout(a).apply {
+            setPadding(pad, Ui.dp(a, 4), pad, 0)
+            addView(sc, LinearLayout.LayoutParams(-1, Ui.dp(a, 480)))
         }
         val d = MaterialAlertDialogBuilder(a)
-            .setTitle("Relatório ao vivo")
+            .setTitle("Relatório do script")
             .setView(box)
             .setPositiveButton("Fechar", null)
             .setNeutralButton("Copiar", null)
             .create()
         val handler = a.scrHandler()
+        var last = ""
         var report = ""
+        fun refresh(force: Boolean) {
+            report = buildReport()
+            if (!force && report == last) return
+            last = report
+            val y = sc.scrollY
+            renderReport(list) { refresh(true) }
+            sc.post { sc.scrollTo(0, y) }
+        }
         val tick = object : Runnable {
-            override fun run() {
-                val total = Script.items.size
-                val done = Script.items.count { it.state == Script.OK || it.state == Script.FAIL }
-                head.text = "${stateName()} · $done de $total tarefa(s) · ${Script.zips.size} ZIP(s)"
-                bar.progress = if (total == 0) 0 else done * 100 / total
-                report = buildReport()
-                tv.text = report
-                handler.postDelayed(this, 1000)
-            }
+            override fun run() { refresh(false); handler.postDelayed(this, 1000) }
         }
         d.setOnDismissListener { handler.removeCallbacks(tick) }
         d.show()

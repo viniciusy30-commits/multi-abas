@@ -50,6 +50,24 @@ class MainActivity : AppCompatActivity() {
     private val prefs by lazy { getSharedPreferences("tabs", 0) }
     private class Fav(var name: String, var url: String, var mode: Int = 0)
     private val favs = mutableListOf<Fav>()
+    /** Botão de ação que o usuário escolheu colocar na barra de baixo (junto dos favoritos). */
+    private class DockAct(val id: String, val label: String, val icon: Int, val run: () -> Unit)
+    private val dockIds = mutableListOf<String>()
+    private fun allDockActs(): List<DockAct> = listOf(
+        DockAct("send_main", "Enviar main", R.drawable.ic_send) { sendMainToClaude() },
+        DockAct("script", "Ver script", R.drawable.ic_play) { scr.ui.showPanel() },
+        DockAct("report", "Relatório", R.drawable.ic_info) { scr.ui.showReport() },
+        DockAct("apk", "Baixar APK", R.drawable.ic_download) { downloadLatestApkNow() },
+        DockAct("game", "Abrir jogo", R.drawable.ic_play) { openCurrentGame() },
+        DockAct("reload", "Recarregar", R.drawable.ic_refresh) { webs[tabs[cur].id]?.reload() },
+        DockAct("projects", "Projetos", R.drawable.ic_folder) { projectPicker() },
+        DockAct("usage", "Uso das contas", R.drawable.ic_timer) { usageMon.ui.show() },
+        DockAct("handoff", "Outra conta", R.drawable.ic_refresh) { manualHandoff() },
+        DockAct("paste", "Texto grande", R.drawable.ic_send) { pasteLargeText() },
+        DockAct("settings", "Ajustes", R.drawable.ic_settings) { settings() },
+        DockAct("menu", "Menu", R.drawable.ic_more) { showMenu() }
+    )
+    private fun dockActs(): List<DockAct> { val all = allDockActs(); return dockIds.mapNotNull { id -> all.firstOrNull { it.id == id } } }
     private val favAdapter = FavAdapter()
     private var favWeb: WebView? = null
     private val limitAsked = HashSet<String>()
@@ -197,7 +215,7 @@ class MainActivity : AppCompatActivity() {
         val rf = findViewById<RecyclerView>(R.id.rvFavs)
         rf.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
         rf.adapter = favAdapter
-        findViewById<ImageButton>(R.id.btnFavAdd).setOnClickListener { editFav(-1) }
+        findViewById<ImageButton>(R.id.btnFavAdd).setOnClickListener { addToDock() }
         loadFavs()
         findViewById<ImageButton>(R.id.btnAdd).setOnClickListener { addTab() }
         findViewById<ImageButton>(R.id.btnMenu).setOnClickListener { showMenu() }
@@ -1722,7 +1740,45 @@ return 'none';})();"""
                 favs.add(Fav(o.getString("name"), o.getString("url"), o.optInt("mode", 0)))
             }
         } catch (e: Exception) { }
+        try {
+            val d = JSONArray(prefs.getString("dock_actions", "[]"))
+            for (i in 0 until d.length()) dockIds.add(d.getString(i))
+        } catch (e: Exception) { }
         favAdapter.notifyDataSetChanged()
+    }
+
+    private fun saveDock() {
+        val d = JSONArray(); dockIds.forEach { d.put(it) }
+        prefs.edit().putString("dock_actions", d.toString()).apply()
+        favAdapter.notifyDataSetChanged()
+    }
+
+    /** "+" da barra: novo favorito (link) ou escolher quais botões de ação ficam na barra. */
+    private fun addToDock() {
+        val sh = Sheet(this).title("Barra de baixo", "Favoritos e botões de ação ficam aqui")
+        sh.row(R.drawable.ic_star, "Novo favorito", "Um link para abrir rápido") { editFav(-1) }
+        sh.row(R.drawable.ic_bolt, "Escolher botões de ação", "Enviar main, ver script, relatório, baixar APK…") { pickDockActions() }
+        sh.show()
+    }
+
+    private fun pickDockActions() {
+        val all = allDockActs()
+        val checked = BooleanArray(all.size) { dockIds.contains(all[it].id) }
+        MaterialAlertDialogBuilder(this).setTitle("Quais botões aparecem na barra?")
+            .setMultiChoiceItems(all.map { it.label }.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Salvar") { _, _ ->
+                val keep = dockIds.filter { id -> all.indexOfFirst { it.id == id }.let { it >= 0 && checked[it] } }
+                val added = all.indices.filter { checked[it] && !keep.contains(all[it].id) }.map { all[it].id }
+                dockIds.clear(); dockIds.addAll(keep + added)
+                saveDock()
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun dockActOptions(a: DockAct) {
+        val sh = Sheet(this).title(a.label, "Botão de ação da barra")
+        sh.row(R.drawable.ic_delete, "Tirar da barra", danger = true) { dockIds.remove(a.id); saveDock() }
+        sh.row(R.drawable.ic_bolt, "Escolher outros botões") { pickDockActions() }
+        sh.show()
     }
 
     private fun saveFavs() {
@@ -1827,19 +1883,36 @@ return 'none';})();"""
         w.destroy()
     }
 
-    inner class FavAdapter : RecyclerView.Adapter<FavAdapter.VH>() {
+    inner class FavAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         inner class VH(val v: View) : RecyclerView.ViewHolder(v) {
             val av: TextView = v.findViewById(R.id.favAvatar)
             val nm: TextView = v.findViewById(R.id.favName)
         }
-        override fun onCreateViewHolder(p: ViewGroup, v: Int) = VH(layoutInflater.inflate(R.layout.item_tab, p, false))
-        override fun getItemCount() = favs.size
-        override fun onBindViewHolder(h: VH, i: Int) {
-            val f = favs[i]
-            h.nm.text = f.name + (if (f.mode == 2) " ↗" else "")
-            Ui.avatar(h.av, f.name)
-            h.v.setOnClickListener { val p = h.bindingAdapterPosition; if (p >= 0) openFav(favs[p]) }
-            h.v.setOnLongClickListener { favOptions(h.bindingAdapterPosition); true }
+        inner class AVH(val v: View) : RecyclerView.ViewHolder(v) {
+            val ic: ImageView = v.findViewById(R.id.actIcon)
+            val nm: TextView = v.findViewById(R.id.actName)
+        }
+        override fun getItemViewType(position: Int) = if (position < dockActs().size) 1 else 0
+        override fun onCreateViewHolder(p: ViewGroup, v: Int): RecyclerView.ViewHolder =
+            if (v == 1) AVH(layoutInflater.inflate(R.layout.item_action, p, false))
+            else VH(layoutInflater.inflate(R.layout.item_tab, p, false))
+        override fun getItemCount() = dockActs().size + favs.size
+        override fun onBindViewHolder(h: RecyclerView.ViewHolder, i: Int) {
+            val acts = dockActs()
+            if (h is AVH) {
+                val act = acts.getOrNull(i) ?: return
+                h.nm.text = act.label
+                h.ic.setImageResource(act.icon)
+                h.v.setOnClickListener { act.run() }
+                h.v.setOnLongClickListener { dockActOptions(act); true }
+            } else if (h is VH) {
+                val k = i - acts.size
+                val f = favs.getOrNull(k) ?: return
+                h.nm.text = f.name + (if (f.mode == 2) " ↗" else "")
+                Ui.avatar(h.av, f.name)
+                h.v.setOnClickListener { val p = h.bindingAdapterPosition - dockActs().size; if (p >= 0 && p < favs.size) openFav(favs[p]) }
+                h.v.setOnLongClickListener { favOptions(h.bindingAdapterPosition - dockActs().size); true }
+            }
         }
     }
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())

@@ -1,3 +1,11 @@
+#id 2026-10-27-g
+#titulo Script continua de onde parou
+- Ao trocar de conta, o Script não repete mais a tarefa do zero: se o ZIP já tinha sido entregue, segue para a próxima
+- A conta nova recebe um PROGRESSO-DO-SCRIPT.md com o que já está pronto e o que falta, mais o trabalho parcial cortado pelo limite
+- Relatório redesenhado: cartão de estado, uma ficha por tarefa com seus ZIPs e a linha do tempo em frases
+- Barra de baixo: toque no + e escolha quais botões ficam ao lado dos favoritos (enviar main, ver script, relatório, baixar APK…)
+- Segure um botão da barra para tirá-lo
+
 #id 2026-10-27-f
 #titulo Script não cancela mais o envio
 - O fechador automático de avisos não clica mais em "Cancelar" nem aperta Escape nas janelas do Claude

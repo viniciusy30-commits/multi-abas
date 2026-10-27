@@ -196,7 +196,7 @@ async function grab(src,folder,base,fname){
    var t=(n.innerText||'').trim();
    if(!t&&!n.querySelector('img'))continue;
    parts.push((isU?'### VOCÊ':'### CLAUDE')+'\n'+t);
-   if(!isU&&t)last=t;
+   if(isU){last='';}else if(t){last=t;}
    var c=n.cloneNode(true);
    c.querySelectorAll('script,style,iframe,video,audio').forEach(function(x){x.remove();});
    var oi=n.querySelectorAll('img'),ci=c.querySelectorAll('img');
@@ -267,6 +267,7 @@ return 'started';
         ctx: Context, fromName: String, fromTabId: String,
         project: Project?, token: String, unfinished: String?, extraDir: File?, prefix: String,
         overlay: Map<String, ByteArray>? = null,
+        progress: String? = null,
         onStatus: (String) -> Unit
     ): File? {
         val transcript = try { chatFile(ctx, fromTabId).readText() } catch (_: Exception) { "" }
@@ -314,6 +315,7 @@ return 'started';
             put(z, "conversa-anterior.txt", transcript.ifBlank { "(nenhuma conversa capturada nesta aba)" })
             put(z, "entregas.txt", log.ifBlank { "(nenhuma entrega registrada)" })
             if (!unfinished.isNullOrBlank()) put(z, "trabalho-incompleto.txt", unfinished)
+            if (!progress.isNullOrBlank()) put(z, "PROGRESSO-DO-SCRIPT.md", progress)
             if (extraDir != null && extraDir.exists()) {
                 extraDir.walkTopDown().filter { it.isFile }.forEach { file ->
                     val rel = file.relativeTo(extraDir).path.replace('\\', '/')
@@ -333,6 +335,7 @@ return 'started';
                 appendLine("## O que tem neste ZIP")
                 appendLine("- `conversa-anterior.txt` — a conversa completa da conta anterior (use para entender pedidos, decisões e pendências).")
                 appendLine("- `entregas.txt` — ZIPs que já foram entregues ao GitHub e o resultado do build.")
+                if (!progress.isNullOrBlank()) appendLine("- `PROGRESSO-DO-SCRIPT.md` — **leia primeiro**: quais tarefas do script já estão CONCLUÍDAS (não refazer), quais arquivos cada uma mudou e em que ponto a tarefa atual parou.")
                 if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/` e `links.txt`.")
                 if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
                 if (!overlay.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${overlay.size} arquivo(s)).")
@@ -348,6 +351,7 @@ return 'started';
                     appendLine()
                 }
                 appendLine("## Como trabalhar")
+                if (!progress.isNullOrBlank()) appendLine("0. Tarefas marcadas ✓ em `PROGRESSO-DO-SCRIPT.md` já estão prontas e aplicadas em `codigo/`: NÃO refaça, NÃO reescreva.")
                 appendLine("1. Leia `conversa-anterior.txt`, principalmente o final: o último pedido pode estar incompleto.")
                 appendLine("2. Confira em `codigo/` o que já existe antes de mexer; não refaça o que está pronto.")
                 appendLine("3. O usuário só usa o celular: entregue tudo como ZIP pronto para baixar, nunca código para copiar e colar.")

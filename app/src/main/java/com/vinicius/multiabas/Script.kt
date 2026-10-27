@@ -40,6 +40,10 @@ object Script {
     var ui = ""
     var resultShown = true
 
+    /** Tarefa cujo trabalho parcial está guardado em [partial] (o que o Claude já tinha escrito quando o limite cortou). */
+    var partialIdx = -1
+    var partial = ""
+
     private const val PREF = "script"
 
     val events = mutableListOf<ScriptEvent>()
@@ -99,6 +103,8 @@ object Script {
             chatTabId = o.optString("chatTabId", "")
             reason = o.optString("reason", "")
             resultShown = o.optBoolean("resultShown", true)
+            partialIdx = o.optInt("partialIdx", -1)
+            partial = o.optString("partial", "")
             val a = o.optJSONArray("items") ?: JSONArray()
             for (i in 0 until a.length()) {
                 val x = a.getJSONObject(i)
@@ -120,7 +126,7 @@ object Script {
             val z = JSONArray()
             zips.forEach { z.put(JSONObject().put("item", it.item).put("name", it.name).put("file", it.file).put("size", it.size).put("hash", it.hash)) }
             val o = JSONObject().put("status", status).put("idx", idx).put("chatTabId", chatTabId)
-                .put("reason", reason).put("resultShown", resultShown).put("items", a).put("zips", z)
+                .put("reason", reason).put("resultShown", resultShown).put("partialIdx", partialIdx).put("partial", partial.takeLast(300_000)).put("items", a).put("zips", z)
             ctx.getSharedPreferences(PREF, 0).edit().putString("data", o.toString()).apply()
         } catch (_: Exception) { }
     }
@@ -210,15 +216,78 @@ object Script {
         "Você não entregou o ZIP da tarefa $n. Entregue agora, como ZIP pronto para baixar, com a versão completa dos arquivos alterados."
 
     const val CONTINUE_MSG =
+        "O limite acabou no meio da tarefa e já voltou. NÃO recomece: olhe o que você já fez nesta conversa, " +
+        "diga em até 3 linhas o que já está pronto e o que falta, e continue SÓ dali. " +
+        "Entregue o ZIP pronto para baixar, com a versão completa dos arquivos alterados."
 
-        "O limite acabou no meio da tarefa e já voltou. Continue exatamente de onde parou e entregue o ZIP pronto para baixar."
+    /**
+     * Mensagem da conta nova. [begun] = o Claude anterior já tinha começado esta tarefa (e foi cortado pelo limite).
+     * O foco é deixar claro o que NÃO deve ser refeito.
+     */
+    fun handoffMessage(n: Int, total: Int, task: String, begun: Boolean): String {
+        val sb = StringBuilder()
+        sb.append("CONTINUAÇÃO DE UM SCRIPT AUTOMÁTICO — NÃO RECOMECE DO ZERO.\n\n")
 
-    fun handoffNote(n: Int, total: Int, task: String) =
-        "Esta conversa é parte de um SCRIPT AUTOMÁTICO de $total tarefa(s) executadas em sequência. " +
-        "Tarefas já concluídas: ${n - 1}. Tarefa ATUAL ($n de $total):\n$task\n\n" +
-        "Os arquivos dos ZIPs das tarefas anteriores já estão aplicados em codigo/ (por cima do repositório). " +
-        "Faça só a tarefa atual (continue de onde parou se estiver incompleta) e entregue o resultado como ZIP pronto " +
-        "para baixar, com a versão COMPLETA de cada arquivo alterado. Não comece as próximas tarefas: eu envio uma por vez."
+        sb.append("Este chat continua um trabalho que começou em outra conta do Claude (o limite de lá acabou). ")
+        sb.append("Anexei um ZIP: leia PRIMEIRO o PROGRESSO-DO-SCRIPT.md, depois o LEIA-ME-PRIMEIRO.md. ")
+        sb.append("O código atual está em codigo/.\n\n")
+        sb.append("O QUE JÁ ESTÁ FEITO (não refaça, não reescreva, não confira de novo):\n")
+        if (n > 1) sb.append("- Tarefas 1 a ${n - 1} estão CONCLUÍDAS e já aplicadas em codigo/.\n")
+        else sb.append("- Nenhuma tarefa foi concluída ainda.\n")
+        if (begun) {
+            sb.append("- A tarefa $n JÁ FOI COMEÇADA pelo Claude anterior e foi cortada pelo limite. ")
+            sb.append("O que ele já fez está em codigo/, em trabalho-incompleto.txt (se existir) e em conversa-anterior.txt.\n\n")
+            sb.append("COMO CONTINUAR A TAREFA $n:\n")
+            sb.append("1) Antes de escrever qualquer coisa, compare codigo/ com o que a tarefa pede e diga em NO MÁXIMO 5 linhas o que já está pronto e o que falta.\n")
+            sb.append("2) Faça SÓ o que falta, aproveitando o que já existe. Se trabalho-incompleto.txt tiver arquivos ou comandos que NÃO estão em codigo/, recrie só isso a partir dele.\n")
+            sb.append("3) Entregue UM ZIP pronto para baixar com a versão COMPLETA de cada arquivo alterado (incluindo o que já estava feito).\n\n")
+        } else {
+            sb.append("- A tarefa $n ainda NÃO foi começada (o limite acabou antes). Pode fazê-la inteira, a partir do código em codigo/.\n\n")
+            sb.append("COMO FAZER A TAREFA $n:\n")
+            sb.append("1) Parta do código de codigo/, que já tem tudo das tarefas anteriores.\n")
+            sb.append("2) Entregue UM ZIP pronto para baixar com a versão COMPLETA de cada arquivo alterado.\n\n")
+        }
+        sb.append("Regras: eu só uso o celular (nada de código para copiar e colar); faça somente a tarefa atual ")
+        sb.append("(as próximas eu envio uma por vez); não faça perguntas se não for essencial; responda curto.\n\n")
+        sb.append("TAREFA ATUAL ($n de $total) — texto original, só para referência:\n$task")
+        return sb.toString()
+    }
+
+    class ProgItem(val text: String, val state: Int)
+
+    /** Cópia da lista de tarefas, tirada na thread principal para ser usada em outra thread. */
+    fun snapshotItems(): List<ProgItem> = items.map { ProgItem(it.text, it.state) }
+
+    /** Conteúdo do PROGRESSO-DO-SCRIPT.md que vai no ZIP levado para a outra conta. */
+    fun progressMd(ctx: Context, its: List<ProgItem>, zs: List<ScriptZip>, current: Int, begun: Boolean): String {
+
+        val sb = StringBuilder()
+        sb.append("# Progresso do script\n\n")
+        sb.append("Script automático com ${its.size} tarefa(s). ")
+        sb.append("Legenda: ✓ concluída (NÃO refazer) · → atual · • na fila · ✗ falhou.\n\n")
+        its.forEachIndexed { i, item ->
+            val mark = when {
+                item.state == OK -> "✓"
+                item.state == FAIL -> "✗"
+                i == current -> "→"
+                else -> "•"
+            }
+            sb.append("## $mark Tarefa ${i + 1} de ${its.size}\n\n")
+            sb.append(item.text.trim().take(1500)).append("\n\n")
+            if (i == current) {
+                sb.append(if (begun) "**Estado: JÁ COMEÇADA e cortada pelo limite.** Veja trabalho-incompleto.txt e conversa-anterior.txt; continue só do que falta.\n\n"
+                          else "**Estado: ainda não começada.**\n\n")
+            }
+            for (z in zs.filter { it.item == i }) {
+                val files = zipFiles(ctx, z)
+                sb.append("ZIP entregue: `${z.name}` — ${files.size} arquivo(s), já aplicados em codigo/:\n")
+                files.take(40).forEach { (n, _) -> sb.append("- $n\n") }
+                if (files.size > 40) sb.append("- … e mais ${files.size - 40}\n")
+                sb.append("\n")
+            }
+        }
+        return sb.toString()
+    }
 }
 
 /** JavaScript que roda dentro da página do Claude. */
