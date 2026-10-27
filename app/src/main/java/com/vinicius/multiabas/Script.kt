@@ -228,8 +228,10 @@ var u=document.querySelectorAll('[data-testid="user-message"]').length;
 var s=!!document.querySelector('[data-is-streaming="true"]');
 if(!s){var bs=document.querySelectorAll('button[aria-label]');for(var i=0;i<bs.length;i++){if(/^(stop|parar|interromper)/i.test(bs[i].getAttribute('aria-label')||'')){s=true;break;}}}
 var n=((document.body&&document.body.innerText)||'').length;
-return JSON.stringify({u:u,s:s,n:n,c:!!document.querySelector('div[contenteditable="true"]')});
-}catch(e){return JSON.stringify({u:-1,s:false,c:false});}})();"""
+var cb=document.querySelector('div[contenteditable="true"]');
+var ce=cb?((cb.innerText||'')+'').replace(/\s+/g,'').length:-1;
+return JSON.stringify({u:u,s:s,n:n,c:!!cb,e:ce});
+}catch(er){return JSON.stringify({u:-1,s:false,c:false,e:-1});}})();"""
 
     /**
      * Fecha avisos/janelas da página do Claude que atrapalham (novidades, pesquisas, "got it", cookies…).
@@ -272,26 +274,48 @@ if(b.disabled||b.getAttribute('aria-disabled')==='true')return 'disabled';
 b.click();return 'sent';})();"""
 
 
-    /** Acha e clica no "Baixar" do ZIP que o Claude entregou. Cada botão só é clicado uma vez. */
+    /**
+     * Acha e clica no "Baixar" do ZIP que o Claude entregou NESTA resposta.
+     * - ignora anexos da própria mensagem do usuário (o ZIP "codigo-...zip" que o app mandou);
+     * - ignora cartões/botões de respostas antigas (senão baixaria de novo o ZIP da tarefa anterior);
+     * - o estado é separado por mensagem enviada, então cada tarefa começa do zero;
+     * - varre de trás para frente: o mais novo primeiro.
+     */
     const val CLICK_DL = """(function(){try{
-var done=window.__sDone||(window.__sDone={});
+var us=document.querySelectorAll('[data-testid="user-message"]');
+var last=us.length?us[us.length-1]:null;
+var thread=null;
+if(us.length>1){thread=us[0];while(thread&&!thread.contains(last))thread=thread.parentElement;}
+var st=window.__sSt;
+if(!st||st.u!==us.length){st=window.__sSt={u:us.length,done:{},open:'',opened:false};}
 var re=/download|baixar|descargar/i;
 function lab(el){return ((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('title')||'')+' '+(el.innerText||'')).replace(/\s+/g,' ').trim();}
 function nameIn(p){var t=(p.innerText||'');if(t.length>600)return '';var m=t.match(/[\w.\-() ]+\.zip/i);return m?m[0].trim():'';}
 function cardName(el){var p=el;for(var k=0;k<6&&p;k++){p=p.parentElement;if(!p)break;var n=nameIn(p);if(n)return n;}return '';}
+function old(el){
+if(!last)return false;
+if(last.contains(el))return true;
+if(thread&&thread.contains(el)&&(last.compareDocumentPosition(el)&2))return true;
+return false;}
+function inThread(el){return !!(thread&&thread.contains(el));}
 var els=document.querySelectorAll('a[download],a[href],button,[role="button"],[role="menuitem"]');
-for(var i=0;i<els.length;i++){var el=els[i];var lb=lab(el);
+for(var i=els.length-1;i>=0;i--){var el=els[i];
+if(old(el))continue;
+var lb=lab(el);
 if(!lb||lb.length>80||!re.test(lb))continue;
-var nm=cardName(el)||(/\.zip/i.test(lb)?lb:'')||window.__sOpen||'';
+if(us.length>1&&!inThread(el)&&!st.opened)continue;
+var nm=cardName(el)||(/\.zip/i.test(lb)?lb:'')||st.open||'';
 if(!nm)continue;
-var key='d|'+nm+'|'+i;if(done[key])continue;
-done[key]=1;el.click();
+var key='d|'+nm;if(st.done[key])continue;
+st.done[key]=1;el.click();
 return JSON.stringify({a:'dl',n:nm});}
-for(var j=0;j<els.length;j++){var e2=els[j];var l2=lab(e2);
+for(var j=els.length-1;j>=0;j--){var e2=els[j];
+if(old(e2))continue;
+var l2=lab(e2);
 if(!l2||l2.length>120||!/\.zip\b/i.test(l2))continue;
-var k2='o|'+l2+'|'+j;if(done[k2])continue;
-done[k2]=1;window.__sOpen=(l2.match(/[\w.\-() ]+\.zip/i)||[l2])[0];e2.click();
-return JSON.stringify({a:'open',n:window.__sOpen});}
+var k2='o|'+l2;if(st.done[k2])continue;
+st.done[k2]=1;st.opened=true;st.open=(l2.match(/[\w.\-() ]+\.zip/i)||[l2])[0];e2.click();
+return JSON.stringify({a:'open',n:st.open});}
 return JSON.stringify({a:'none'});
-}catch(e){return JSON.stringify({a:'err',m:String(e)});}})();"""
+}catch(er){return JSON.stringify({a:'err',m:String(er)});}})();"""
 }

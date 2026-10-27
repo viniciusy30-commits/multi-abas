@@ -339,11 +339,38 @@ class ScriptRunner(private val a: MainActivity) {
             if (g != gen || Script.status != Script.RUNNING) return@evaluateJavascript
             if (raw?.contains("sent") == true) {
                 confirmSent(w, 0, g)
+                return@evaluateJavascript
+            }
+            // botão que nem existe na página: não adianta esperar para sempre
+            if (raw?.contains("none") == true && n >= 60) {
+                failPause("Não achei o botão de enviar do Claude")
+                return@evaluateJavascript
+            }
+            // a caixa de mensagem ficou vazia sozinha = a mensagem já saiu (só a leitura de "enviada" falhou)
+            if (n > 0 && n % 20 == 0) {
+                w.evaluateJavascript(ScriptJs.STATE) { r2 ->
+                    if (g != gen || Script.status != Script.RUNNING) return@evaluateJavascript
+                    val o = try { JSONObject(Handoff.unquote(r2) ?: "{}") } catch (_: Exception) { JSONObject() }
+                    if (o.optInt("e", -1) == 0) {
+                        Script.log(a, "Caixa de mensagem vazia: considerando a tarefa ${Script.idx + 1} enviada")
+                        markSent()
+                    } else {
+                        w.postDelayed({ trySend(w, n + 1, g) }, 500)
+                    }
+                }
             } else {
-                // o botão pode estar desativado até o upload acabar: tenta de novo, sem limite
+                // o botão pode estar desativado até o upload acabar: tenta de novo
                 w.postDelayed({ trySend(w, n + 1, g) }, 500)
             }
         }
+    }
+
+    private fun markSent() {
+        chatStarted = true
+        taskSent = true
+        sentAt = System.currentTimeMillis()
+        Script.log(a, "Mensagem enviada ao Claude (tarefa ${Script.idx + 1})")
+        enterWait(true)
     }
 
     private fun confirmSent(w: android.webkit.WebView, n: Int, g: Int) {
@@ -355,11 +382,7 @@ class ScriptRunner(private val a: MainActivity) {
                 val u = o.optInt("u", -1)
                 val s = o.optBoolean("s", false)
                 if (u > baseU || s) {
-                    chatStarted = true
-                    taskSent = true
-                    sentAt = System.currentTimeMillis()
-                    Script.log(a, "Mensagem enviada ao Claude (tarefa ${Script.idx + 1})")
-                    enterWait(true)
+                    markSent()
                 } else if (n < 12) {
                     confirmSent(w, n + 1, g)
                 } else {
@@ -476,6 +499,19 @@ class ScriptRunner(private val a: MainActivity) {
     private fun noZip(g: Int) {
         if (g != gen) return
         if (zipGot) { taskDone(Script.OK); return }
+        val tab = a.scrTab(Script.chatTabId)
+        if (tab == null) { askOrFail(g); return }
+        // a resposta pode ter parado porque o limite acabou: isso não é "Claude não entregou"
+        a.scrSnap(tab) { snap, active ->
+            if (g != gen || Script.status != Script.RUNNING) return@scrSnap
+            if (zipGot) { taskDone(Script.OK); return@scrSnap }
+            if (snap != null && snap.limit && active) { onLimit(); return@scrSnap }
+            askOrFail(g)
+        }
+    }
+
+    private fun askOrFail(g: Int) {
+        if (g != gen || Script.status != Script.RUNNING) return
         if (askCount < 2) {
             askCount++
             Script.log(a, "Sem ZIP na tarefa ${Script.idx + 1}: pedindo de novo ($askCount/2)")
@@ -501,9 +537,14 @@ class ScriptRunner(private val a: MainActivity) {
                 Script.save(a)
                 Script.log(a, "ZIP recebido na tarefa ${item + 1}: $name (${bytes.size / 1024} KB)")
                 status("ZIP recebido: $name")
+                zipGot = true
+                a.scrSay("Script: ZIP guardado (${Script.zips.size})")
+            } else {
+                // conteúdo idêntico a um ZIP já guardado = provavelmente o da tarefa anterior baixado de novo.
+                // Não conta como entrega: o script cobra o ZIP certo do Claude.
+                Script.log(a, "ZIP repetido ignorado na tarefa ${item + 1}: $name")
+                a.scrSay("Script: ZIP repetido ignorado")
             }
-            zipGot = true
-            a.scrSay("Script: ZIP guardado (${Script.zips.size})")
         }
         return true
     }
