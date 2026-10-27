@@ -219,6 +219,8 @@ class MainActivity : AppCompatActivity() {
         load()
         if (!profilesOk) say("Seu WebView não separa contas. Atualize o \"Android System WebView\" na Play Store.", true)
         select(cur)
+        Script.load(this)
+        if (Script.status == Script.RUNNING) scr.resumeAfterRestart()
         Updater.autoCheck(this)
         Novidades.show(this, false)
         handler.postDelayed(handoffTick, 8000)
@@ -576,6 +578,8 @@ class MainActivity : AppCompatActivity() {
             Tile(R.drawable.ic_folder, "Projetos") { projectPicker() },
             Tile(R.drawable.ic_settings, "Ajustes") { settings() }
         ))
+        sh.section("Automação")
+        sh.row(R.drawable.ic_play, "Script de tarefas", scriptSub(), highlighted = Script.status == Script.RUNNING) { scr.ui.showPanel() }
         sh.section("Limite acabou?")
         sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Salva o chat completo, imagens e código num ZIP e leva para outra aba") { manualHandoff() }
         sh.section("Texto grande")
@@ -687,6 +691,8 @@ class MainActivity : AppCompatActivity() {
         val isZipUnknown = (ext == "bin" || ext.isEmpty()) && looksLikeZipBytes(bytes)
         if (!isZipName && !isZipUnknown) return
         val zipName = if (isZipName) name else name.substringBeforeLast('.', name) + ".zip"
+        // script rodando: o ZIP fica guardado para o final, não vai direto ao GitHub
+        if (Script.status == Script.RUNNING && scr.onZip(zipName, bytes)) return
         val proj = Projects.current(this)
         if (proj == null) {
             say("ZIP salvo. Defina um Projeto atual no menu para enviar ao GitHub.", true)
@@ -849,7 +855,7 @@ class MainActivity : AppCompatActivity() {
                     Handoff.save(this, t.id, snap)
                     if (snap.limit) {
                         val active = applyLimitTime(t, snap.until)
-                        if (active && limitAsked.add(t.id)) offerHandoff(t)
+                        if (active && Script.status != Script.RUNNING && limitAsked.add(t.id)) offerHandoff(t)
                     } else {
                         limitAsked.remove(t.id)
                         if (t.limitSrc.isNotEmpty()) { t.limitSrc = ""; save() }
@@ -918,6 +924,76 @@ class MainActivity : AppCompatActivity() {
             .setItems(labels) { _, which -> startHandoff(from, sorted[which]) }
             .setNegativeButton("Cancelar", null)
             .show()
+    }
+
+    // ───────────── Script (fila de tarefas) ─────────────
+
+    internal val scr: ScriptRunner by lazy { ScriptRunner(this) }
+
+    private fun scriptSub(): String = when (Script.status) {
+        Script.RUNNING -> "Rodando: tarefa ${Script.idx + 1} de ${Script.items.size}"
+        Script.PAUSED -> "Pausado: tarefa ${Script.idx + 1} de ${Script.items.size}"
+        Script.DONE -> "Concluído · ${Script.zips.size} ZIP(s) para enviar"
+        else -> if (Script.items.isEmpty()) "Monte uma lista de tarefas e deixe rodar sozinho" else "${Script.items.size} tarefa(s) na lista"
+    }
+
+    internal fun scrHandler() = handler
+    internal fun scrTabs(): List<Tab> = tabs.toList()
+    internal fun scrTab(id: String): Tab? = tabs.firstOrNull { it.id == id }
+    internal fun scrCurrentTab(): Tab? = tabs.getOrNull(cur)
+    internal fun scrWeb(t: Tab): WebView? = webs[t.id]
+    internal fun scrWebOpen(t: Tab): WebView = webFor(t)
+    internal fun scrSelect(t: Tab) { val i = tabs.indexOf(t); if (i >= 0) select(i) }
+    internal fun scrSay(m: String, long: Boolean = false) = say(m, long)
+    internal fun scrConfirm(title: String, msg: String, ok: String, f: () -> Unit) = confirm(title, msg, ok, f)
+    internal fun scrReturnLabel(ms: Long): String = returnLabel(ms)
+    internal fun scrSetUntil(t: Tab, ms: Long) { t.until = ms; save(); tickNow() }
+    internal fun scrSave(bytes: ByteArray, name: String) = saveBytes(bytes, name, "application/zip")
+    internal fun scrWaitComposer(w: WebView, tries: Int, cb: (Boolean) -> Unit) = waitComposer(w, tries, cb)
+    internal fun scrCaptureFull(w: WebView?, progress: (String) -> Unit, cb: (java.io.File?, String?, JSONObject?) -> Unit) =
+        captureFull(w, progress, cb)
+
+    internal fun scrAttach(t: Tab, f: java.io.File, cb: (Boolean) -> Unit) {
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f)
+            attachZip(t, f, uri, cb)
+        } catch (_: Exception) { cb(false) }
+    }
+
+    /** Abre um chat novo na aba e espera a caixa de mensagem aparecer. */
+    internal fun scrOpenNew(t: Tab, cb: (Boolean) -> Unit) {
+        val w = webFor(t)
+        t.holdUntil = System.currentTimeMillis() + 25_000L
+        w.loadUrl("https://claude.ai/new")
+        w.postDelayed({ waitComposer(w, 25, cb) }, 2500)
+    }
+
+    /** Lê a página da aba (guarda a conversa e atualiza o limite). cb(leitura, contaEmLimiteAgora). */
+    internal fun scrSnap(t: Tab, cb: (Handoff.Snap?, Boolean) -> Unit) {
+        val w = webs[t.id]
+        if (w == null || System.currentTimeMillis() < t.holdUntil) { cb(null, false); return }
+        w.evaluateJavascript(Handoff.CAPTURE_JS) { raw ->
+            val snap = Handoff.parse(raw)
+            var active = false
+            if (snap != null) {
+                Handoff.save(this, t.id, snap)
+                if (snap.limit) {
+                    active = applyLimitTime(t, snap.until)
+                } else {
+                    limitAsked.remove(t.id)
+                    if (t.limitSrc.isNotEmpty()) { t.limitSrc = ""; save() }
+                }
+            }
+            cb(snap, active)
+        }
+    }
+
+    /** Mostra o resultado do script (ZIPs para enviar) se ele terminou e ainda não foi visto. */
+    internal fun scrShowPending() {
+        if (isFinishing || isDestroyed) return
+        if (Script.status != Script.DONE || Script.resultShown) return
+        if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
+        scr.ui.showResults()
     }
 
     // ───────────── Colar texto grande → arquivo → anexo no Claude ─────────────
@@ -1636,6 +1712,7 @@ return 'none';})();"""
         Updater.autoCheck(this)
         handler.post(ticker)
         if (prefs.getBoolean("keepalive", true)) KeepAliveService.start(this)
+        handler.postDelayed({ scrShowPending() }, 600)
     }
 
     override fun onPause() {

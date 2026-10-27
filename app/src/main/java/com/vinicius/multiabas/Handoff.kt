@@ -265,6 +265,7 @@ return 'started';
     fun build(
         ctx: Context, fromName: String, fromTabId: String,
         project: Project?, token: String, unfinished: String?, extraDir: File?, prefix: String,
+        overlay: Map<String, ByteArray>? = null,
         onStatus: (String) -> Unit
     ): File? {
         val transcript = try { chatFile(ctx, fromTabId).readText() } catch (_: Exception) { "" }
@@ -289,7 +290,7 @@ return 'started';
                         var e = zi.nextEntry
                         while (e != null) {
                             val n = e.name.substringAfter('/', "")
-                            if (n.isNotEmpty() && !e.isDirectory && !skip(n)) {
+                            if (n.isNotEmpty() && !e.isDirectory && !skip(n) && overlay?.containsKey(n) != true) {
                                 z.putNextEntry(ZipEntry("codigo/$n"))
                                 zi.copyTo(z)
                                 z.closeEntry()
@@ -298,6 +299,14 @@ return 'started';
                         }
                     }
                     codeOk = true
+                }
+            }
+            if (!overlay.isNullOrEmpty()) {
+                onStatus("Aplicando as tarefas já feitas do script…")
+                overlay.forEach { (n, b) ->
+                    z.putNextEntry(ZipEntry("codigo/$n"))
+                    z.write(b)
+                    z.closeEntry()
                 }
             }
             onStatus("Salvando a conversa…")
@@ -325,6 +334,7 @@ return 'started';
                 appendLine("- `entregas.txt` — ZIPs que já foram entregues ao GitHub e o resultado do build.")
                 if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/` e `links.txt`.")
                 if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
+                if (!overlay.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${overlay.size} arquivo(s)).")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
                 else appendLine("- (o código não pôde ser baixado; peça ao usuário o ZIP do projeto se precisar dele)")
                 appendLine()

@@ -1,3 +1,13 @@
+#id 2026-10-27-a
+#titulo Script de tarefas automático
+- Menu → Script de tarefas: monte a lista do que quer fazer e toque em Play
+- O app manda uma tarefa por vez no Claude, espera terminar e baixa cada ZIP sozinho
+- Se o limite acabar, ele leva tudo para outra conta e continua, mesmo com o app minimizado
+- Só para quando termina a lista; aí mostra todos os ZIPs com botão para enviar ao GitHub (juntos ou um por um)
+- Separe várias tarefas de uma vez com uma linha contendo só ---
+- Prompts grandes (mais de 8 mil caracteres) vão como arquivo .txt anexado, sem travar o chat
+- Relatório ao vivo: acompanhe cada tarefa, os arquivos de cada ZIP e a linha do tempo, atualizando sozinho
+
 #id 2026-10-26-a
 #titulo Foto da conta, abas separadas e limite corrigido
 - Foto da conta: segure a aba → Foto da conta e escolha uma imagem da galeria no lugar da letra
