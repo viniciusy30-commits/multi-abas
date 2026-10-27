@@ -66,8 +66,6 @@ object GitHubDelivery {
                 list.firstOrNull { it.id == project.id }?.branch = branch
                 Projects.save(ctx, list)
 
-                try { ensureWorkflow(ctx, token, project, branch, onStatus) } catch (_: Exception) { }
-
                 val path = project.pathFor(fileName)
                 onStatus("Enviando $fileName → ${project.fullRepo()}/$path ($branch)…")
                 val put = putFile(token, project, branch, path, bytes, "Entrega automática: $fileName")
@@ -440,39 +438,6 @@ object GitHubDelivery {
         } catch (_: Exception) {
             null
         }
-    }
-
-    /**
-     * Garante que o workflow que descompacta o ZIP aguenta duas entregas seguidas
-     * (sem isso o 2º "push" é recusado e o ZIP fica parado). Só troca o workflow padrão do app;
-     * se o token não tiver permissão "workflow", segue sem mexer.
-     */
-    private fun ensureWorkflow(ctx: Context, token: String, p: Project, branch: String, onStatus: (String) -> Unit) {
-        val path = ".github/workflows/unpack-and-commit.yml"
-        val cur = apiGet(token, "/repos/${p.fullRepo()}/contents/$path?ref=${Uri.encode(branch)}") ?: return
-        val sha = cur.optString("sha")
-        val old = try {
-            String(Base64.decode(cur.optString("content").replace("\n", ""), Base64.DEFAULT), StandardCharsets.UTF_8)
-        } catch (_: Exception) { return }
-        if (!old.contains("entrega-bot") || old.contains("pull --rebase")) return   // não é o padrão do app, ou já está corrigido
-        val fresh = ctx.assets.open("unpack-and-commit.yml").readBytes()
-        onStatus("Atualizando o workflow de entrega (evita ZIP preso)…")
-        val body = JSONObject()
-            .put("message", "Workflow de entrega: aguenta entregas seguidas")
-            .put("content", Base64.encodeToString(fresh, Base64.NO_WRAP))
-            .put("branch", branch)
-            .put("sha", sha)
-        val c = URL("$API/repos/${p.fullRepo()}/contents/$path").openConnection() as HttpURLConnection
-        c.requestMethod = "PUT"
-        c.connectTimeout = 30000
-        c.readTimeout = 60000
-        c.doOutput = true
-        c.setRequestProperty("Accept", "application/vnd.github+json")
-        c.setRequestProperty("Authorization", "Bearer $token")
-        c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        c.setRequestProperty("Content-Type", "application/json")
-        c.outputStream.use { it.write(body.toString().toByteArray(StandardCharsets.UTF_8)) }
-        if (c.responseCode !in 200..299) onStatus("Não consegui atualizar o workflow (o token precisa da permissão \"workflow\"); sigo com o antigo")
     }
 
     /** Texto simples de um endereço da API (segue o redirecionamento do log sem mandar o token adiante). */
