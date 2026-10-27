@@ -1,3 +1,10 @@
+#id 2026-10-27-b
+#titulo Uso estimado para contas free
+- Contas free não têm barra de uso: o app agora estima o % de cada conta pelo que acontece nos chats
+- A estimativa aprende sozinha: cada vez que o Claude avisa que o limite acabou, o app calibra a capacidade da conta
+- Aparece com ~ na etiqueta da aba e em Uso das contas; contas com barra real continuam mostrando o valor exato
+- Toque no card da conta em Uso das contas para corrigir ("Está em 50%"), zerar ou esquecer a estimativa
+
 #id 2026-10-27-a
 #titulo Script de tarefas automático
 - Menu → Script de tarefas: monte a lista do que quer fazer e toque em Play

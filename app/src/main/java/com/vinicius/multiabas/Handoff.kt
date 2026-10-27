@@ -70,6 +70,7 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:!
     fun save(ctx: Context, tabId: String, s: Snap) {
         if (s.text.length < 40) return
         if (!s.url.contains("/chat/")) return
+        try { Est.observe(ctx, tabId, s.url, s.text) } catch (_: Exception) { }
         try {
             val f = chatFile(ctx, tabId)
             val old = if (f.exists()) f.readText() else ""

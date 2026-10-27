@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private val favAdapter = FavAdapter()
     private var favWeb: WebView? = null
     private val limitAsked = HashSet<String>()
+    private val limitLearned = HashSet<String>()
     /** limitSrc = CLEARED → o usuário mexeu no limite à mão; ignora o aviso da página até ele sumir. */
     private val CLEARED = "#manual"
     private var avatarTabId: String? = null
@@ -221,6 +222,7 @@ class MainActivity : AppCompatActivity() {
         select(cur)
         Script.load(this)
         Usage.load(this)
+        Est.load(this)
         if (Script.status == Script.RUNNING) scr.resumeAfterRestart()
         Updater.autoCheck(this)
         Novidades.show(this, false)
@@ -859,7 +861,7 @@ class MainActivity : AppCompatActivity() {
                         val active = applyLimitTime(t, snap.until)
                         if (active && Script.status != Script.RUNNING && limitAsked.add(t.id)) offerHandoff(t)
                     } else {
-                        limitAsked.remove(t.id)
+                        limitAsked.remove(t.id); limitLearned.remove(t.id)
                         if (t.limitSrc.isNotEmpty()) { t.limitSrc = ""; save() }
                     }
                 }
@@ -880,9 +882,9 @@ class MainActivity : AppCompatActivity() {
         if (key.isNotEmpty() && key == t.limitSrc) return t.until > now
         val at = LimitTime.parse(key, now)
         return when (at) {
-            LimitTime.UNKNOWN -> true
+            LimitTime.UNKNOWN -> { if (limitLearned.add(t.id)) Est.onLimit(this, t.id, 0L); true }
             LimitTime.PASSED -> { t.limitSrc = key; t.until = 0L; save(); tickNow(); false }
-            else -> { t.limitSrc = key; t.until = at; save(); tickNow(); true }
+            else -> { t.limitSrc = key; t.until = at; save(); tickNow(); Est.onLimit(this, t.id, at); true }
         }
     }
 
@@ -982,7 +984,7 @@ class MainActivity : AppCompatActivity() {
                 if (snap.limit) {
                     active = applyLimitTime(t, snap.until)
                 } else {
-                    limitAsked.remove(t.id)
+                    limitAsked.remove(t.id); limitLearned.remove(t.id)
                     if (t.limitSrc.isNotEmpty()) { t.limitSrc = ""; save() }
                 }
             }
@@ -1005,7 +1007,10 @@ class MainActivity : AppCompatActivity() {
     private fun usageSub(): String {
         val parts = tabs.mapNotNull { t ->
             val i = Usage.map[t.id]
-            if (i == null || i.err.isNotEmpty() || i.s < 0) null else "${t.name} ${i.s}%"
+            if (t.until > System.currentTimeMillis()) "${t.name} 100%"
+            else if (i != null && i.err.isEmpty() && i.s >= 0) "${t.name} ${i.s}%"
+            else if (Est.known(t.id)) "${t.name} ~${Est.percent(this, t.id)}%"
+            else null
         }
         return if (parts.isEmpty()) "Veja quanto cada conta já usou, ao vivo" else parts.joinToString(" · ")
     }
@@ -1850,7 +1855,7 @@ return 'none';})();"""
                     st.text = "Liberado" + Usage.chip(t.id); st.setTextColor(Color.parseColor("#4ADE80"))
                     ret.visibility = View.GONE
                 } else {
-                    st.text = fmt(left) + Usage.chip(t.id); st.setTextColor(Color.parseColor("#E0A58F"))
+                    st.text = fmt(left); st.setTextColor(Color.parseColor("#E0A58F"))
                     ret.text = returnLabel(t.until)
                     ret.visibility = View.VISIBLE
                 }

@@ -29,7 +29,10 @@ object Usage {
 
     private const val PREF = "usage"
 
+    lateinit var appCtx: Context
+
     fun load(ctx: Context) {
+        appCtx = ctx.applicationContext
         try {
             val o = JSONObject(ctx.getSharedPreferences(PREF, 0).getString("data", "{}") ?: "{}")
             o.keys().forEach { k ->
@@ -54,10 +57,17 @@ object Usage {
 
     /** Texto curto para a etiqueta da aba, ex.: " · 42%". Vazio se não há leitura recente. */
     fun chip(tabId: String): String {
-        val i = map[tabId] ?: return ""
-        if (i.err.isNotEmpty() || i.s < 0) return ""
-        if (System.currentTimeMillis() - i.at > 20 * 60_000L) return ""
-        return " · ${i.s}%"
+
+        val i = map[tabId]
+        if (i != null && i.err.isEmpty() && i.s >= 0 && System.currentTimeMillis() - i.at <= 20 * 60_000L) return " · ${i.s}%"
+        if (!::appCtx.isInitialized || !Est.known(tabId)) return ""
+        return " · ~${Est.percent(appCtx, tabId)}%"
+    }
+
+    /** Há leitura real (da página de uso) recente? */
+    fun hasReal(tabId: String): Boolean {
+        val i = map[tabId] ?: return false
+        return i.err.isEmpty() && (i.s >= 0 || i.w >= 0)
     }
 
     const val JS = """(function(){try{
@@ -124,8 +134,13 @@ class UsageMonitor(private val a: MainActivity) {
     }
 
     /** Lê uma conta de cada vez, para não pesar. */
-    fun refreshAll(done: () -> Unit = {}) {
-        val list = a.scrTabs()
+    fun refreshAll(force: Boolean = false, done: () -> Unit = {}) {
+        val now = System.currentTimeMillis()
+        // conta sem a página de uso (free): não fica tentando a cada minuto
+        val list = a.scrTabs().filter { t ->
+            val i = Usage.map[t.id]
+            force || i == null || i.err.isEmpty() || now - i.at > 30 * 60_000L
+        }
         fun step(i: Int) {
             if (i >= list.size) { done(); return }
             refresh(list[i]) { a.runOnUiThread { step(i + 1) } }
@@ -194,30 +209,53 @@ class UsageUi(private val a: MainActivity, private val mon: UsageMonitor) {
                 setTypeface(typeface, Typeface.BOLD)
                 setTextColor(if (limited) Color.parseColor("#E0A58F") else Ui.color(a, R.color.text))
             })
-            if (info == null || (info.err.isNotEmpty() && info.s < 0 && info.w < 0)) {
-                run {
-                    card.addView(TextView(a).apply {
-                        text = if (mon.isBusy(t.id)) "Lendo o uso desta conta…"
-                               else if (info != null) info.err else "Ainda não li. Toque em Atualizar."
-                        textSize = 12.5f
-                        setTextColor(Ui.color(a, R.color.muted))
-                    })
-                }
+            if (info != null && Usage.hasReal(t.id)) {
+                bar(card, "Sessão (5 h)", info.s, info.sr)
+                bar(card, "Semana", info.w, info.wr)
+                card.addView(TextView(a).apply {
+                    text = (if (mon.isBusy(t.id)) "Atualizando… " else "") + "Lido ${ago(info.at)}" +
+                        (if (info.err.isNotEmpty()) " · última tentativa falhou: ${info.err}" else "")
+                    textSize = 11f
+                    setTextColor(Ui.color(a, R.color.muted))
+                    setPadding(0, dp(6), 0, 0)
+                })
             } else {
-                run {
-                    bar(card, "Sessão (5 h)", info.s, info.sr)
-                    bar(card, "Semana", info.w, info.wr)
-                    card.addView(TextView(a).apply {
-                        text = (if (mon.isBusy(t.id)) "Atualizando… " else "") + "Lido ${ago(info.at)}" +
-                            (if (info.err.isNotEmpty()) " · última tentativa falhou: ${info.err}" else "")
-                        textSize = 11f
-                        setTextColor(Ui.color(a, R.color.muted))
-                        setPadding(0, dp(6), 0, 0)
-                    })
-                }
+                // conta free: sem barra de uso na página → estimativa que aprende sozinha
+                val pct = if (limited) 100 else if (Est.known(t.id)) Est.percent(a, t.id) else -1
+                bar(card, "Sessão (estimada)", pct, "")
+                val n = Est.learned(t.id)
+                val g = Est.resetGuess(t.id)
+                val parts = ArrayList<String>()
+                if (g > now && !limited) parts.add("janela reinicia ~${a.scrReturnLabel(g)}")
+                parts.add(if (n == 0) "ainda sem calibrar (chute inicial)" else "calibrada $n× pelos limites")
+                card.addView(TextView(a).apply {
+                    text = parts.joinToString(" · ") + "\nToque para corrigir"
+                    textSize = 11.5f
+                    setTextColor(Ui.color(a, R.color.muted))
+                    setPadding(0, dp(4), 0, 0)
+                })
+                card.setOnClickListener { recalibrate(t) }
             }
             box.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
         }
+    }
+
+    private fun recalibrate(t: Tab) {
+        val opts = arrayOf("Está em 25%", "Está em 50%", "Está em 75%", "Está em 90%", "Zerar (janela nova agora)", "Esquecer estimativa")
+        MaterialAlertDialogBuilder(a)
+            .setTitle(t.name)
+            .setItems(opts) { _, w ->
+                when (w) {
+                    0 -> Est.setPercent(a, t.id, 25)
+                    1 -> Est.setPercent(a, t.id, 50)
+                    2 -> Est.setPercent(a, t.id, 75)
+                    3 -> Est.setPercent(a, t.id, 90)
+                    4 -> Est.zero(a, t.id)
+                    5 -> Est.forget(a, t.id)
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     fun show() {
@@ -247,7 +285,7 @@ class UsageUi(private val a: MainActivity, private val mon: UsageMonitor) {
         d.show()
         d.getButton(DialogInterface.BUTTON_NEUTRAL)?.setOnClickListener {
             next = System.currentTimeMillis() + 60_000L
-            mon.refreshAll { }
+            mon.refreshAll(true) { }
         }
         tick.run()
     }
