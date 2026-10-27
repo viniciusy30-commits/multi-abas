@@ -241,7 +241,7 @@ return JSON.stringify({u:u,s:s,n:n,c:!!cb,e:ce});
 var lim=/sem\s+mensagens|mensagens\s+gratuitas|(you.?ve|you have)\s+(reached|hit)|usage limit|limit\s+(will\s+)?reset|resets?\s+(at|in|on)\s|atingiu\s+o\s+limite|limite\s.{0,40}(redefin|reinici|volt|renov)|volta(r[áa])?\s.{0,20}\d/i;
 var bad=/upgrade|assinar|subscribe|pagar|\bpay\b|delete|excluir|apagar|remov|log\s*out|sign\s*out|sair|comprar|purchase|get (plus|pro|max)|try (claude|pro)/i;
 var closeLbl=/^(close|fechar|dismiss|dispensar|close dialog|fechar janela)$/i;
-var soft=/^(got it|entendi|ok|okay|not now|agora n[ãa]o|no,? thanks|n[ãa]o,? obrigad[oa]|maybe later|later|depois|skip|pular|i understand|entendo|done|conclu[íi]do|cancel|cancelar)$/i;
+var soft=/^(got it|entendi|ok|okay|not now|agora n[ãa]o|no,? thanks|n[ãa]o,? obrigad[oa]|maybe later|later|depois|skip|pular|i understand|entendo|done|conclu[íi]do)$/i;
 var cookie=/^(accept all|aceitar tudo|accept|aceitar|reject all|rejeitar tudo|reject|rejeitar)$/i;
 function vis(e){var r=e.getBoundingClientRect();return r.width>4&&r.height>4;}
 function lb(b){return ((b.getAttribute('aria-label')||'')+'').trim()||((b.innerText||'')+'').replace(/\s+/g,' ').trim();}
@@ -255,7 +255,7 @@ var bs=d.querySelectorAll('button,[role="button"]');var pick=null;
 for(var j=0;j<bs.length&&!pick;j++){var l=lb(bs[j]);if(l&&closeLbl.test(l)&&vis(bs[j]))pick=bs[j];}
 if(!pick){var ck=/cookie/i.test(t);for(var j2=0;j2<bs.length&&!pick;j2++){var l2=lb(bs[j2]);if(!l2||bad.test(l2)||!vis(bs[j2]))continue;if(soft.test(l2)||(ck&&cookie.test(l2)))pick=bs[j2];}}
 if(pick){pick.click();n++;txt=t.slice(0,80);}
-else{var ev={key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true};d.dispatchEvent(new KeyboardEvent('keydown',ev));document.dispatchEvent(new KeyboardEvent('keydown',ev));n++;txt=t.slice(0,80);}
+else{txt=t.slice(0,80);}
 }
 return JSON.stringify({n:n,t:txt});
 }catch(e){return JSON.stringify({n:0,t:''});}})();"""
