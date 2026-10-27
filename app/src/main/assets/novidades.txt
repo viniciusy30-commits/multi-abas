@@ -1,6 +1,6 @@
 #id 2026-10-26-a
-#titulo Selos, abas separadas e limite corrigido
-- Selo nas abas: segure a aba → Selo do projeto. Use o ícone ou a capa de um repositório do GitHub, ou uma foto da galeria
+#titulo Foto da conta, abas separadas e limite corrigido
+- Foto da conta: segure a aba → Foto da conta e escolha uma imagem da galeria no lugar da letra
 - Abas separadas em Liberadas e Em recarga (as em recarga ficam em ordem de quem volta primeiro)
 - Corrigido: o limite não vai mais para o dia seguinte quando o horário do aviso já passou
 - Quando a recarga termina, o app avisa e recarrega a aba para sumir o aviso antigo

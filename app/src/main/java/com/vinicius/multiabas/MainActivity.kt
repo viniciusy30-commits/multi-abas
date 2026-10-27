@@ -55,15 +55,15 @@ class MainActivity : AppCompatActivity() {
     private val limitAsked = HashSet<String>()
     /** limitSrc = CLEARED → o usuário mexeu no limite à mão; ignora o aviso da página até ele sumir. */
     private val CLEARED = "#manual"
-    private var badgeTabId: String? = null
-    private val badgePicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        val id = badgeTabId
-        badgeTabId = null
+    private var avatarTabId: String? = null
+    private val avatarPicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val id = avatarTabId
+        avatarTabId = null
         if (uri != null && id != null) {
             Thread {
-                val ok = Badges.saveFromUri(this, id, uri)
+                val ok = Avatars.saveFromUri(this, id, uri)
                 runOnUiThread {
-                    if (ok) { refreshRows(); say("Selo definido") } else say("Não consegui usar essa imagem", true)
+                    if (ok) { refreshRows(); say("Foto da conta definida") } else say("Não consegui usar essa imagem", true)
                 }
             }.start()
         }
@@ -528,7 +528,7 @@ class MainActivity : AppCompatActivity() {
             input("Renomear aba", t.name) { t.name = it; refreshRows(); save() }
         }
         sh.row(R.drawable.ic_refresh, "Recarregar") { webs[t.id]?.reload() }
-        sh.row(R.drawable.ic_star, "Selo do projeto", if (Badges.has(this, t.id)) "Trocar ou remover o selo desta aba" else "Põe a foto de um projeto do GitHub na aba") { badgeOptions(t) }
+        sh.row(R.drawable.ic_star, "Foto da conta", if (Avatars.has(this, t.id)) "Trocar ou remover a foto" else "Escolher uma foto da galeria no lugar da letra") { photoOptions(t) }
         sh.row(R.drawable.ic_send, "Continuar em outra conta", "Leva o projeto e a conversa desta aba") { chooseTarget(t) }
         sh.row(R.drawable.ic_timer, "Definir volta do limite", "Mostra um cronômetro na aba") {
             val idx = tabs.indexOf(t)
@@ -548,7 +548,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun closeTab(i: Int) {
         val t = tabs.removeAt(i)
-        Badges.clear(this, t.id)
+        Avatars.clear(this, t.id)
         coolingIds.remove(t.id)
         webs.remove(t.id)?.let { container.removeView(it); it.destroy() }
         try { if (profilesOk) ProfileStore.getInstance().deleteProfile("p_" + t.id) } catch (e: Exception) { }
@@ -1680,14 +1680,31 @@ return 'none';})();"""
         }
     }
 
+    /** "volta às 17:30", "volta amanhã às 05:40" ou "volta sex 30/10 às 10:00". */
+    private fun returnLabel(ms: Long): String {
+        val hm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(ms))
+        fun midnight(t: Long): Long {
+            val c = java.util.Calendar.getInstance()
+            c.timeInMillis = t
+            c.set(java.util.Calendar.HOUR_OF_DAY, 0); c.set(java.util.Calendar.MINUTE, 0)
+            c.set(java.util.Calendar.SECOND, 0); c.set(java.util.Calendar.MILLISECOND, 0)
+            return c.timeInMillis
+        }
+        val days = Math.round((midnight(ms) - midnight(System.currentTimeMillis())) / 86_400_000.0).toInt()
+        return when {
+            days <= 0 -> "volta às $hm"
+            days == 1 -> "volta amanhã às $hm"
+            else -> "volta " + java.text.SimpleDateFormat("EEE dd/MM", java.util.Locale("pt", "BR")).format(java.util.Date(ms)) + " às $hm"
+        }
+    }
+
     private fun limitLabel(t: Tab, now: Long): String {
         if (t.until <= now) return "✓  ${t.name}  ·  liberada"
         val left = t.until - now
         val h = left / 3_600_000L
         val m = (left % 3_600_000L) / 60_000L
-        val at = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(t.until))
         val falta = if (h > 0) "${h}h${m.toString().padStart(2, '0')}" else "${m}min"
-        return "⏳  ${t.name}  ·  volta às $at (falta $falta)"
+        return "⏳  ${t.name}  ·  ${returnLabel(t.until)} (falta $falta)"
     }
 
     private fun fmt(ms: Long): String {
@@ -1715,13 +1732,18 @@ return 'none';})();"""
             val av: TextView = v.findViewById(R.id.tabAvatar)
             val name: TextView = v.findViewById(R.id.tabName)
             val st: TextView = v.findViewById(R.id.tabStatus)
-            val badge: ImageView = v.findViewById(R.id.tabBadge)
+            val ret: TextView = v.findViewById(R.id.tabReturn)
             fun bindStatus(t: Tab) {
-                if (t.until <= 0L) { st.visibility = View.GONE; return }
                 st.visibility = View.VISIBLE
                 val left = t.until - System.currentTimeMillis()
-                if (left <= 0L) { st.text = "Liberado"; st.setTextColor(Color.parseColor("#4ADE80")) }
-                else { st.text = fmt(left); st.setTextColor(Color.parseColor("#E0A58F")) }
+                if (t.until <= 0L || left <= 0L) {
+                    st.text = "Liberado"; st.setTextColor(Color.parseColor("#4ADE80"))
+                    ret.visibility = View.GONE
+                } else {
+                    st.text = fmt(left); st.setTextColor(Color.parseColor("#E0A58F"))
+                    ret.text = returnLabel(t.until)
+                    ret.visibility = View.VISIBLE
+                }
             }
         }
         inner class HeadVH(val box: LinearLayout, val label: TextView) : RecyclerView.ViewHolder(box)
@@ -1733,7 +1755,7 @@ return 'none';})();"""
             if (type == 1) {
                 val box = LinearLayout(p.context)
                 box.gravity = android.view.Gravity.CENTER_VERTICAL
-                box.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)).apply { marginEnd = dp(8) }
+                box.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(56)).apply { marginEnd = dp(8) }
                 val tv = TextView(p.context)
                 tv.textSize = 10.5f
                 tv.letterSpacing = 0.06f
@@ -1758,9 +1780,11 @@ return 'none';})();"""
             val t = row.tab
             h.name.text = t.name
             Ui.avatar(h.av, t.name)
-            val bmp = Badges.get(this@MainActivity, t.id)
-            if (bmp != null) { h.badge.setImageBitmap(bmp); h.badge.visibility = View.VISIBLE }
-            else { h.badge.setImageDrawable(null); h.badge.visibility = View.GONE }
+            val bmp = Avatars.get(this@MainActivity, t.id)
+            if (bmp != null) {
+                h.av.text = ""
+                h.av.background = android.graphics.drawable.BitmapDrawable(resources, bmp)
+            }
             val sel = tabs.indexOf(t) == cur
             h.v.isSelected = sel
             h.name.setTextColor(if (sel) Color.WHITE else Color.parseColor("#B0B6C3"))
@@ -1807,77 +1831,24 @@ return 'none';})();"""
         if (pos >= 0) rv.scrollToPosition(pos)
     }
 
-    // ───────────── Selo da aba ─────────────
+    // ───────────── Foto da conta ─────────────
 
-    private fun badgeOptions(t: Tab) {
-        val sh = Sheet(this).title("Selo da aba", "Marca \"${t.name}\" com a foto de um projeto")
-        val list = Projects.load(this)
-        if (list.isNotEmpty()) sh.section("Seus projetos")
-        list.forEach { p ->
-            sh.row(R.drawable.ic_code, p.name, p.fullRepo()) { chooseBadgeSource(t, p.owner, p.repo, p.branch) }
-        }
-        sh.section("Outras opções")
-        sh.row(R.drawable.ic_folder, "Outro repositório do GitHub", "Lista todos os seus repositórios") { pickBadgeRepo(t) }
-        sh.row(R.drawable.ic_add, "Foto da galeria", "Qualquer imagem do celular") {
-            badgeTabId = t.id
+    private fun photoOptions(t: Tab) {
+        val sh = Sheet(this).title("Foto da conta", "Aparece no lugar da letra de \"${t.name}\"")
+        sh.row(R.drawable.ic_add, "Escolher da galeria", "Qualquer imagem do celular") {
+            avatarTabId = t.id
             try {
-                badgePicker.launch(
+                avatarPicker.launch(
                     androidx.activity.result.PickVisualMediaRequest.Builder()
                         .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly).build()
                 )
-            } catch (_: Exception) { badgeTabId = null; say("Não consegui abrir a galeria", true) }
+            } catch (_: Exception) { avatarTabId = null; say("Não consegui abrir a galeria", true) }
         }
-        if (Badges.has(this, t.id)) {
-            sh.row(R.drawable.ic_delete, "Remover selo", danger = true) {
-                Badges.clear(this, t.id); refreshRows(); say("Selo removido")
+        if (Avatars.has(this, t.id)) {
+            sh.row(R.drawable.ic_delete, "Remover foto", "Volta para a letra inicial", danger = true) {
+                Avatars.clear(this, t.id); refreshRows(); say("Foto removida")
             }
         }
         sh.show()
-    }
-
-    private fun chooseBadgeSource(t: Tab, owner: String, repo: String, branch: String) {
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Qual imagem de $repo?")
-            .setItems(arrayOf("Ícone do app (automático)", "Imagem de capa do repositório")) { _, which ->
-                fetchBadge(t, owner, repo, branch, which == 1)
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
-    private fun fetchBadge(t: Tab, owner: String, repo: String, branch: String, cover: Boolean) {
-        val token = Projects.token(this)
-        say("Baixando a imagem de $repo…")
-        Thread {
-            val bmp = try { Badges.fetchForRepo(token, owner, repo, branch, cover) } catch (_: Exception) { null }
-            val ok = bmp != null && Badges.save(this, t.id, bmp)
-            runOnUiThread {
-                if (ok) { refreshRows(); say("Selo definido em \"${t.name}\"") }
-                else say("Não achei imagem em $repo. Tente a capa ou a galeria.", true)
-            }
-        }.start()
-    }
-
-    private fun pickBadgeRepo(t: Tab) {
-        val token = Projects.token(this)
-        if (token.isBlank()) {
-            say("Configure o Token do GitHub primeiro", true)
-            editToken()
-            return
-        }
-        say("Carregando repositórios…")
-        Thread {
-            val repos = try { GitHubRepos.listMyRepos(token) } catch (_: Exception) { emptyList() }
-            runOnUiThread {
-                if (repos.isEmpty()) { say("Nenhum repositório encontrado (confira o token)", true); return@runOnUiThread }
-                val sh = Sheet(this).title("Escolha o repositório", "${repos.size} encontrados na sua conta")
-                repos.forEach { r ->
-                    sh.row(R.drawable.ic_code, r.name, r.description.ifBlank { null }) {
-                        chooseBadgeSource(t, r.owner, r.name, r.defaultBranch)
-                    }
-                }
-                sh.show()
-            }
-        }.start()
     }
 }
