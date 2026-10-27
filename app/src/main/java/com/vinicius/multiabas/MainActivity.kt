@@ -1340,6 +1340,7 @@ class MainActivity : AppCompatActivity() {
     private fun attachZip(to: Tab, f: java.io.File, uri: Uri, result: (Boolean) -> Unit) {
         val w = webs[to.id]
         if (w == null) { result(false); return }
+        attLog("Anexando ${f.name} (${f.length() / 1024} KB)")
         if (f.length() > 25L * 1024 * 1024) { attachWithRetries(to, uri, 1, result); return }
         Thread {
             val b64 = try { android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP) } catch (e: Exception) { null }
@@ -1379,8 +1380,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun tryInject(w: WebView, name: String, mode: String, cb: (Boolean) -> Unit) {
         w.evaluateJavascript(Handoff.INJECT_JS.replace("__MODE__", mode), null)
+        // o Claude mostra o nome do anexo sem ".zip" e às vezes cortado: procura só o começo, sem a extensão
+        val probe = name.substringBeforeLast('.').let { if (it.length > 20) it.substring(0, 20) else it }.ifBlank { name }
         fun look(n: Int) {
-            w.evaluateJavascript("(function(n){return document.body.innerText.indexOf(n)>=0?'yes':'no';})(" + JSONObject.quote(name) + ");") { r ->
+            w.evaluateJavascript("(function(n){return document.body.innerText.indexOf(n)>=0?'yes':'no';})(" + JSONObject.quote(probe) + ");") { r ->
                 if (r?.contains("yes") == true) cb(true)
                 else if (n <= 0) cb(false)
                 else w.postDelayed({ look(n - 1) }, 1000)

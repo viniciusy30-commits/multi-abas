@@ -303,8 +303,21 @@ class ScriptRunner(private val a: MainActivity) {
                         status("Anexando ${attach[i].name}…")
                         a.scrAttach(tab, attach[i]) { done ->
                             if (ok()) {
-                                // falhou? tenta de novo logo em seguida, sem desistir
-                                if (!done) w.postDelayed({ attachNext(i) }, 800) else attachNext(i + 1)
+                                if (done) {
+                                    attachNext(i + 1)
+                                } else {
+                                    // a leitura falhou, mas o arquivo pode ter entrado: confere antes de anexar de novo
+                                    a.scrAttachedOk(w, listOf(attach[i].name), false) { has ->
+                                        if (!ok()) return@scrAttachedOk
+                                        if (has) {
+                                            Script.log(a, "Anexo ${attach[i].name} já está na página; seguindo")
+                                            attachNext(i + 1)
+                                        } else {
+                                            Script.log(a, "Anexo ${attach[i].name} não entrou; tentando de novo")
+                                            w.postDelayed({ attachNext(i) }, 800)
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
