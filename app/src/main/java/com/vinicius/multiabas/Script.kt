@@ -44,6 +44,17 @@ object Script {
     var partialIdx = -1
     var partial = ""
 
+    /** Missão automática: UM pedido; o app conduz o Claude em rodadas até ele entregar o ZIP final. */
+    var mission = false
+    /** Rodada atual da missão (1, 2, 3…). */
+    var round = 1
+    /** A mensagem da tarefa/rodada atual já saiu (sobrevive ao fechar o app). */
+    var began = false
+    /** O chat do script já foi aberto com o ZIP do código (sobrevive ao fechar o app). */
+    var chatStarted = false
+    /** Quantas vezes o ZIP desta rodada foi recusado pela conferência. */
+    var rejects = 0
+
     private const val PREF = "script"
 
     val events = mutableListOf<ScriptEvent>()
@@ -52,6 +63,7 @@ object Script {
     fun log(ctx: Context, text: String) {
         events.add(ScriptEvent(System.currentTimeMillis(), text))
         while (events.size > 300) events.removeAt(0)
+        if (mission) Mission.journal(ctx, text)
         try {
             val a = JSONArray()
             events.forEach { a.put(JSONObject().put("t", it.t).put("x", it.text)) }
@@ -105,6 +117,11 @@ object Script {
             resultShown = o.optBoolean("resultShown", true)
             partialIdx = o.optInt("partialIdx", -1)
             partial = o.optString("partial", "")
+            mission = o.optBoolean("mission", false)
+            round = o.optInt("round", 1)
+            began = o.optBoolean("began", false)
+            chatStarted = o.optBoolean("chatStarted", false)
+            rejects = o.optInt("rejects", 0)
             val a = o.optJSONArray("items") ?: JSONArray()
             for (i in 0 until a.length()) {
                 val x = a.getJSONObject(i)
@@ -127,6 +144,7 @@ object Script {
             zips.forEach { z.put(JSONObject().put("item", it.item).put("name", it.name).put("file", it.file).put("size", it.size).put("hash", it.hash)) }
             val o = JSONObject().put("status", status).put("idx", idx).put("chatTabId", chatTabId)
                 .put("reason", reason).put("resultShown", resultShown).put("partialIdx", partialIdx).put("partial", partial.takeLast(300_000)).put("items", a).put("zips", z)
+                .put("mission", mission).put("round", round).put("began", began).put("chatStarted", chatStarted).put("rejects", rejects)
             ctx.getSharedPreferences(PREF, 0).edit().putString("data", o.toString()).apply()
         } catch (_: Exception) { }
     }
@@ -158,23 +176,24 @@ object Script {
         try { dir(ctx).listFiles()?.forEach { it.delete() } } catch (_: Exception) { }
     }
 
-    /** Arquivos de todos os ZIPs na ordem das tarefas; o mais novo vence quando o caminho se repete. */
+    /**
+     * Arquivos de todos os ZIPs na ordem das tarefas; o mais novo vence quando o caminho se repete.
+     * Tira a pasta que o Claude às vezes coloca embrulhando tudo e deixa de fora PLANO-VIVO.md (é só do app).
+     */
     fun overlay(ctx: Context): LinkedHashMap<String, ByteArray> {
         val out = LinkedHashMap<String, ByteArray>()
         for (z in zips) {
-            try {
-                ZipInputStream(zipFile(ctx, z).inputStream().buffered()).use { zi ->
-                    var e = zi.nextEntry
-                    while (e != null) {
-                        val n = e.name.replace('\\', '/').trimStart('/')
-                        if (!e.isDirectory && n.isNotEmpty() && !n.startsWith(".github/") && !n.startsWith("__MACOSX/") && !n.contains("..")) {
-                            out.remove(n)
-                            out[n] = zi.readBytes()
-                        }
-                        e = zi.nextEntry
-                    }
-                }
-            } catch (_: Exception) { }
+            var raw: ByteArray? = null
+            try { raw = zipFile(ctx, z).readBytes() } catch (_: Exception) { }
+            if (raw == null) continue
+            val entries = Mission.readZip(raw) ?: continue
+            val prefix = Mission.wrapperPrefix(ctx, entries.map { it.first })
+            for ((name, b) in entries) {
+                val n = name.removePrefix(prefix)
+                if (n.isEmpty() || n.startsWith(".github/") || n.contains("..") || Mission.isMeta(n)) continue
+                out.remove(n)
+                out[n] = b
+            }
         }
         return out
     }
@@ -252,6 +271,55 @@ object Script {
         sb.append("Regras: eu só uso o celular (nada de código para copiar e colar); faça somente a tarefa atual ")
         sb.append("(as próximas eu envio uma por vez); não faça perguntas se não for essencial; responda curto.\n\n")
         sb.append("TAREFA ATUAL ($n de $total) — texto original, só para referência:\n$task")
+        return sb.toString()
+    }
+
+    // ───────────── missão automática ─────────────
+
+    private const val MISSION_RULES =
+        "REGRAS DA MISSÃO (valem em toda resposta):\n" +
+        "1) Eu só uso o celular e um app conduz você sozinho até o fim: NÃO faça perguntas, decida e siga em frente. Respostas curtas, sem repetir código no chat.\n" +
+        "2) A cada resposta faça UM passo do plano (que caiba numa resposta) e entregue UM ZIP pronto para baixar, com a versão COMPLETA de cada arquivo alterado ou novo, acumulando o que você já entregou. NUNCA use \"...\", \"resto do código igual\" nem trechos: o app recusa ZIP com trecho omitido.\n" +
+        "3) Caminhos a partir da raiz do repositório (ex.: app/src/main/...), SEM pasta embrulhando tudo. Nome do ZIP: entrega-NN.zip (NUNCA começando com \"codigo-\" nem \"continuar-\": são os ZIPs que o app manda).\n" +
+        "4) TODO ZIP traz na raiz o arquivo PLANO-VIVO.md: o plano em passos com [x] feito e [ ] pendente, decisões tomadas, arquivos já alterados e o PRÓXIMO PASSO exato. É por ele que outra conta continua se o seu limite acabar. O app guarda esse arquivo e não o envia ao repositório.\n" +
+        "5) Quando TODOS os passos estiverem prontos e revisados, entregue o ZIP final e escreva, SOZINHA na última linha da resposta: MISSAO-CONCLUIDA\n" +
+        "   Não escreva essa linha antes disso e não a cite em outro lugar."
+
+    fun missionFirst(task: String) =
+        "MISSÃO AUTOMÁTICA. Anexei um ZIP com o código atual do projeto (pasta codigo/).\n\n" +
+        "Primeiro passo: leia o pedido abaixo, monte o plano em passos pequenos (PLANO-VIVO.md) e já execute o passo 1.\n\n" +
+        MISSION_RULES + "\n\n" +
+        "PEDIDO ORIGINAL (é o plano principal; o objetivo não muda):\n" + task
+
+    fun missionNext(round: Int) =
+        "RODADA $round. Continue o PLANO-VIVO.md: faça o próximo passo pendente (só ele) e entregue UM ZIP pronto para baixar com a versão COMPLETA dos arquivos alterados e o PLANO-VIVO.md atualizado na raiz.\n" +
+        "Se TODOS os passos estiverem prontos e revisados, entregue o ZIP final e escreva, SOZINHA na última linha: MISSAO-CONCLUIDA"
+
+    fun missionAskZip(round: Int) =
+        "Você não entregou o ZIP da rodada $round. Entregue agora, como ZIP pronto para baixar, com a versão COMPLETA dos arquivos alterados e o PLANO-VIVO.md na raiz."
+
+    fun zipFix(problems: String) =
+        "O ZIP que você entregou NÃO foi aceito pelo app. Problemas encontrados:\n$problems\n\n" +
+        "Corrija e entregue de novo UM ZIP pronto para baixar, com a versão COMPLETA de cada arquivo (sem \"...\" nem trechos omitidos) e o PLANO-VIVO.md na raiz. Se um aviso de arquivo menor estiver certo de propósito, entregue o ZIP de novo e diga em uma linha por quê."
+
+    /** Mensagem da conta nova: o plano original e o plano vivo vão dentro do ZIP; aqui está a ordem de leitura e o que NÃO refazer. */
+    fun missionHandoff(round: Int, begun: Boolean): String {
+        val sb = StringBuilder()
+        sb.append("CONTINUAÇÃO DE UMA MISSÃO AUTOMÁTICA — NÃO RECOMECE DO ZERO.\n\n")
+        sb.append("Este chat continua um trabalho que começou em outra conta do Claude (o limite de lá acabou). ")
+        sb.append("Anexei um ZIP. Leia NESTA ORDEM: 1) PLANO-ORIGINAL.md (o pedido original completo, o objetivo não muda); ")
+        sb.append("2) PLANO-VIVO.md (o plano, o que já está [x] pronto e o próximo passo); 3) LEIA-ME-PRIMEIRO.md. ")
+        sb.append("O código atual está em codigo/ e já inclui TUDO que foi entregue até agora.\n\n")
+        sb.append("RODADA ATUAL: $round.\n")
+        if (begun) {
+            sb.append("A rodada $round JÁ FOI COMEÇADA pelo Claude anterior e foi cortada pelo limite. ")
+            sb.append("O que ele já fez está em codigo/, em trabalho-incompleto.txt (se existir) e em conversa-anterior.txt.\n\n")
+            sb.append("Antes de escrever, compare codigo/ com o plano e diga em NO MÁXIMO 5 linhas o que já está pronto e o que falta. ")
+            sb.append("Faça SÓ o que falta (se trabalho-incompleto.txt tiver arquivos que NÃO estão em codigo/, recrie só isso).\n\n")
+        } else {
+            sb.append("A rodada $round ainda NÃO foi começada. Parta de codigo/ e faça o próximo passo pendente do PLANO-VIVO.md. Não refaça nem reconfira o que está [x].\n\n")
+        }
+        sb.append(MISSION_RULES)
         return sb.toString()
     }
 

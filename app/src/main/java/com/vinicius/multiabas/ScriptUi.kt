@@ -43,7 +43,7 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
 
         if (running) {
             sh.section("Andamento")
-            sh.row(R.drawable.ic_timer, "Tarefa ${Script.idx + 1} de ${Script.items.size}", Script.ui.ifBlank { "Trabalhando…" }, highlighted = true) { showPanel() }
+            sh.row(R.drawable.ic_timer, if (Script.mission) "Missão · rodada ${Script.round}" else "Tarefa ${Script.idx + 1} de ${Script.items.size}", Script.ui.ifBlank { "Trabalhando…" }, highlighted = true) { showPanel() }
             sh.row(R.drawable.ic_close, "Pausar", "Para depois da etapa atual; dá para continuar") { runner.pause(); showPanel() }
             sh.row(R.drawable.ic_delete, "Parar", "Encerra o script e mantém os ZIPs já baixados", danger = true) {
                 a.scrConfirm("Parar o script?", "Os ZIPs já baixados ficam guardados.", "Parar") { runner.stop() }
@@ -66,6 +66,25 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
         if (Script.items.isNotEmpty() || Script.events.isNotEmpty()) {
             sh.section("Acompanhar")
             sh.row(R.drawable.ic_info, "Relatório ao vivo", "O que já foi feito, ZIPs e linha do tempo", highlighted = running) { showReport() }
+        }
+
+        if (!running && !paused) {
+            sh.section("Modo automático")
+            sh.row(R.drawable.ic_bolt, "Missão automática", "Descreva o pedido uma vez. O app conduz o Claude até o ZIP final e troca de conta sozinho", highlighted = true) {
+                editDialog("Descreva a missão", "", true) { t -> runner.startMission(t); showPanel() }
+            }
+        }
+        if (Script.mission && Script.items.isNotEmpty()) {
+            sh.section("Plano da missão (salvo no aparelho)")
+            sh.row(R.drawable.ic_info, "Plano original", "O pedido salvo palavra por palavra; não muda") {
+                showText("Plano original", Mission.original(a).ifBlank { "(vazio)" })
+            }
+            sh.row(R.drawable.ic_check, "Plano vivo", "Passos feitos e pendentes, como o Claude deixou no último ZIP") {
+                showText("Plano vivo", Mission.living(a).ifBlank { "O Claude ainda não entregou o primeiro ZIP." })
+            }
+            sh.row(R.drawable.ic_timer, "Diário da missão", "Contas usadas, limites, ZIPs aceitos e recusados") {
+                showText("Diário da missão", Mission.diary(a).takeLast(5000).ifBlank { "(vazio)" })
+            }
         }
 
         sh.section("Tarefas (${Script.items.size})")
@@ -97,6 +116,7 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
             sh.row(R.drawable.ic_delete, "Limpar lista e ZIPs", null, danger = true) {
                 a.scrConfirm("Limpar tudo?", "Apaga a lista de tarefas e os ZIPs guardados do script.", "Limpar") {
                     Script.items.clear()
+                    Script.mission = false
                     Script.clearZips(a)
                     Script.clearEvents(a)
                     Script.status = Script.IDLE
@@ -110,12 +130,25 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
         sh.show()
     }
 
+    private fun showText(title: String, body: String) {
+        MaterialAlertDialogBuilder(a)
+            .setTitle(title)
+            .setMessage(body.take(8000))
+            .setPositiveButton("Fechar", null)
+            .show()
+    }
+
     private fun addTasks(list: List<String>) {
         val clean = list.map { it.trim() }.filter { it.isNotEmpty() }
         if (clean.isEmpty()) { showPanel(); return }
         if (Script.status == Script.DONE) {
             Script.status = Script.IDLE
             Script.idx = 0
+        }
+        if (Script.mission) {
+            // a lista passa a ser de tarefas comuns: tira o pedido da missão
+            Script.items.clear()
+            Script.mission = false
         }
         clean.forEach { Script.items.add(ScriptItem(java.util.UUID.randomUUID().toString(), it)) }
         Script.save(a)
@@ -172,8 +205,10 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
         Script.save(a)
         val ok = Script.items.count { it.state == Script.OK }
         val fail = Script.items.count { it.state == Script.FAIL }
-        val title = if (Script.status == Script.DONE) "Script concluído" else "ZIPs do script"
-        val sub = "$ok tarefa(s) ok" + (if (fail > 0) " · $fail sem ZIP" else "") + " · ${Script.zips.size} ZIP(s)"
+        val title = if (Script.mission) (if (Script.status == Script.DONE) "Missão concluída" else "ZIPs da missão")
+                    else if (Script.status == Script.DONE) "Script concluído" else "ZIPs do script"
+        val sub = if (Script.mission) "${Script.round} rodada(s) · ${Script.zips.size} ZIP(s)" + (if (fail > 0) " · sem confirmação final" else "")
+                  else "$ok tarefa(s) ok" + (if (fail > 0) " · $fail sem ZIP" else "") + " · ${Script.zips.size} ZIP(s)"
         val sh = Sheet(a).title(title, sub)
         if (Script.zips.isEmpty()) {
             sh.note("Nenhum ZIP foi guardado.")
@@ -287,7 +322,7 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
         val fail = Script.items.count { it.state == Script.FAIL }
         val sb = StringBuilder()
         sb.append("ESTADO: ").append(stateName())
-        if (Script.status == Script.RUNNING || Script.status == Script.PAUSED) sb.append(" — tarefa ${Script.idx + 1} de $total")
+        if (Script.status == Script.RUNNING || Script.status == Script.PAUSED) sb.append(if (Script.mission) " — missão, rodada ${Script.round}" else " — tarefa ${Script.idx + 1} de $total")
         sb.append('\n')
         if (Script.status == Script.RUNNING && Script.ui.isNotBlank()) sb.append("AGORA: ").append(Script.ui).append('\n')
         if (Script.status == Script.PAUSED && Script.reason.isNotBlank()) sb.append("MOTIVO: ").append(Script.reason).append('\n')

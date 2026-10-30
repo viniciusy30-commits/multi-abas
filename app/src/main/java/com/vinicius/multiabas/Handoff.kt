@@ -277,6 +277,7 @@ return 'started';
         val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
         val out = File(outDir, "$prefix-${slug(project?.name ?: fromName)}-$stamp.zip")
 
+        val ov: Map<String, ByteArray>? = overlay ?: (if (Script.mission) Script.overlay(ctx) else null)
         val log = if (project != null) readLog(ctx, project.id) else ""
         val branch = project?.branch?.ifBlank { "main" } ?: "main"
 
@@ -291,7 +292,7 @@ return 'started';
                         var e = zi.nextEntry
                         while (e != null) {
                             val n = e.name.substringAfter('/', "")
-                            if (n.isNotEmpty() && !e.isDirectory && !skip(n) && overlay?.containsKey(n) != true) {
+                            if (n.isNotEmpty() && !e.isDirectory && !skip(n) && ov?.containsKey(n) != true) {
                                 z.putNextEntry(ZipEntry("codigo/$n"))
                                 zi.copyTo(z)
                                 z.closeEntry()
@@ -302,13 +303,44 @@ return 'started';
                     codeOk = true
                 }
             }
-            if (!overlay.isNullOrEmpty()) {
+            if (!codeOk) {
+                // GitHub falhou (sem rede, token, limite da API…): usa a cópia do código guardada no aparelho
+                val bf = Mission.baseFile(ctx)
+                if (bf.exists()) {
+                    onStatus("Usando a cópia do código guardada no aparelho…")
+                    try {
+                        ZipInputStream(bf.inputStream().buffered()).use { zi ->
+                            var e = zi.nextEntry
+                            while (e != null) {
+                                val n = e.name.removePrefix("codigo/")
+                                if (!e.isDirectory && e.name.startsWith("codigo/") && !skip(n) && ov?.containsKey(n) != true) {
+                                    z.putNextEntry(ZipEntry(e.name))
+                                    zi.copyTo(z)
+                                    z.closeEntry()
+                                }
+                                e = zi.nextEntry
+                            }
+                        }
+                        codeOk = true
+                    } catch (_: Exception) { }
+                }
+            }
+            if (!ov.isNullOrEmpty()) {
                 onStatus("Aplicando as tarefas já feitas do script…")
-                overlay.forEach { (n, b) ->
+                ov.forEach { (n, b) ->
                     z.putNextEntry(ZipEntry("codigo/$n"))
                     z.write(b)
                     z.closeEntry()
                 }
+            }
+            if (Script.mission) {
+                // o plano principal e o andamento, em arquivos de verdade (não dependem de ler o chat)
+                val orig = Mission.original(ctx)
+                val live = Mission.living(ctx)
+                val diary = Mission.diary(ctx)
+                if (orig.isNotBlank()) put(z, "PLANO-ORIGINAL.md", orig)
+                if (live.isNotBlank()) put(z, "PLANO-VIVO.md", live)
+                if (diary.isNotBlank()) put(z, "diario-da-missao.txt", diary.takeLast(60_000))
             }
             onStatus("Salvando a conversa…")
             put(z, "conversa-anterior.txt", transcript.ifBlank { "(nenhuma conversa capturada nesta aba)" })
@@ -334,10 +366,15 @@ return 'started';
                 appendLine("## O que tem neste ZIP")
                 appendLine("- `conversa-anterior.txt` — a conversa completa da conta anterior (use para entender pedidos, decisões e pendências).")
                 appendLine("- `entregas.txt` — ZIPs que já foram entregues ao GitHub e o resultado do build.")
+                if (Script.mission) {
+                    appendLine("- `PLANO-ORIGINAL.md` — **o pedido original completo** (o plano principal). O objetivo não muda.")
+                    appendLine("- `PLANO-VIVO.md` — o plano com passos [x] prontos e [ ] pendentes e o próximo passo exato (se ainda não existir, o Claude anterior não chegou a entregar o primeiro ZIP).")
+                    appendLine("- `diario-da-missao.txt` — linha do tempo: contas usadas, limites, ZIPs aceitos e recusados.")
+                }
                 if (!progress.isNullOrBlank()) appendLine("- `PROGRESSO-DO-SCRIPT.md` — **leia primeiro**: quais tarefas do script já estão CONCLUÍDAS (não refazer), quais arquivos cada uma mudou e em que ponto a tarefa atual parou.")
                 if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/` e `links.txt`.")
                 if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
-                if (!overlay.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${overlay.size} arquivo(s)).")
+                if (!ov.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${ov.size} arquivo(s)).")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
                 else appendLine("- (o código não pôde ser baixado; peça ao usuário o ZIP do projeto se precisar dele)")
                 appendLine()
@@ -350,6 +387,7 @@ return 'started';
                     appendLine()
                 }
                 appendLine("## Como trabalhar")
+                if (Script.mission) appendLine("00. MISSÃO: leia PLANO-ORIGINAL.md e PLANO-VIVO.md antes de tudo; o que está [x] não se refaz; siga as REGRAS DA MISSÃO da mensagem do chat.")
                 if (!progress.isNullOrBlank()) appendLine("0. Tarefas marcadas ✓ em `PROGRESSO-DO-SCRIPT.md` já estão prontas e aplicadas em `codigo/`: NÃO refaça, NÃO reescreva.")
                 appendLine("1. Leia `conversa-anterior.txt`, principalmente o final: o último pedido pode estar incompleto.")
                 appendLine("2. Confira em `codigo/` o que já existe antes de mexer; não refaça o que está pronto.")

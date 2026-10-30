@@ -49,6 +49,19 @@ class ScriptRunner(private val a: MainActivity) {
     private var lastSnapAt = 0L
     private var limitBusy = false
     private var wake: PowerManager.WakeLock? = null
+    /** Problemas achados no último ZIP recusado; vão na mensagem que pede a correção. */
+    private var pendingFix = ""
+    private var sendStartedAt = 0L
+    private var sendRetries = 0
+    private var lastText = ""
+    private var lastNew = false
+    private var lastAttach: List<File> = emptyList()
+
+    /** Guarda no disco que a tarefa/rodada já foi enviada (para retomar certo se o app fechar). */
+    private fun setBegan(v: Boolean) {
+        taskBegan = v
+        Script.began = v
+    }
 
     private val total get() = Script.items.size
 
@@ -88,6 +101,10 @@ class ScriptRunner(private val a: MainActivity) {
     private fun guardTick() {
         val n = a.scrDismissAppDialogs()
         if (n > 0) Script.log(a, "Fechei um aviso do app que apareceu sozinho")
+        if (phase == Phase.SENDING && sendStartedAt > 0L && System.currentTimeMillis() - sendStartedAt > 10 * 60_000L) {
+            sendWatchdog()
+            return
+        }
         if (phase != Phase.SENDING && phase != Phase.WAIT_DONE && phase != Phase.GET_ZIP) return
         val tab = a.scrTab(Script.chatTabId) ?: return
         val w = a.scrWeb(tab) ?: return
@@ -111,6 +128,21 @@ class ScriptRunner(private val a: MainActivity) {
         }
     }
 
+    /** O envio ficou preso (página que não abre, anexo que não sobe): tenta de novo, e só pausa depois de 2 tentativas. */
+    private fun sendWatchdog() {
+        sendStartedAt = System.currentTimeMillis()
+        if (sendRetries >= 2) {
+            sendStartedAt = 0L
+            failPause("O envio para o Claude travou por 10 minutos (2 tentativas). Toque em Continuar para tentar de novo")
+            return
+        }
+        sendRetries++
+        Script.log(a, "Envio travado há 10 min; tentando de novo ($sendRetries/2)")
+        gen++
+        limitBusy = false
+        sendMessage(lastText, lastNew, lastAttach)
+    }
+
     // ───────────── controles ─────────────
 
     fun start() {
@@ -128,6 +160,13 @@ class ScriptRunner(private val a: MainActivity) {
             return
         }
         Script.clearZips(a)
+        Script.round = 1
+        Script.began = false
+        Script.chatStarted = false
+        Script.rejects = 0
+        pendingFix = ""
+        sendRetries = 0
+        if (Script.mission && Script.items.isNotEmpty()) Mission.startRun(a, Script.items[0].text)
         Script.items.forEach { it.state = Script.PEND; it.zips = 0 }
         Script.idx = 0
         Script.partial = ""
@@ -151,6 +190,19 @@ class ScriptRunner(private val a: MainActivity) {
         beginTask()
     }
 
+    /** Missão automática: um pedido só; o app conduz o Claude em rodadas até o ZIP final e troca de conta sozinho. */
+    fun startMission(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) { a.scrSay("Descreva a missão", true); return }
+        if (Script.status == Script.RUNNING) return
+        Script.items.clear()
+        Script.items.add(ScriptItem(java.util.UUID.randomUUID().toString(), t))
+        Script.mission = true
+        Script.status = Script.IDLE
+        Script.save(a)
+        start()
+    }
+
     fun pause() {
         if (Script.status != Script.RUNNING) return
         gen++
@@ -168,7 +220,8 @@ class ScriptRunner(private val a: MainActivity) {
         Script.status = Script.RUNNING
         Script.reason = ""
         Script.save(a)
-        Script.log(a, "Continuando a tarefa ${Script.idx + 1}")
+        Script.log(a, if (Script.mission) "Continuando a missão (rodada ${Script.round})" else "Continuando a tarefa ${Script.idx + 1}")
+        askCount = 0
         gen++
         limitBusy = false
         acquireWake()
@@ -208,15 +261,21 @@ class ScriptRunner(private val a: MainActivity) {
         gen++
         val g = gen
         limitBusy = false
-        chatStarted = true
-        taskSent = true
-        taskBegan = true
+        // o que já tinha sido enviado vem do disco: não reenvia a tarefa nem fica esperando uma resposta que nunca foi pedida
+        chatStarted = Script.chatStarted
+        taskBegan = Script.began
+        taskSent = Script.began
         acquireWake()
         startGuard()
         status("Retomando depois de reabrir o app…")
         try { a.scrWebOpen(tab) } catch (_: Exception) { }
         h.postDelayed({
             if (g != gen || Script.status != Script.RUNNING) return@postDelayed
+            if (!taskBegan) {
+                Script.log(a, "App reaberto antes do envio: começando a ${if (Script.mission) "rodada ${Script.round}" else "tarefa ${Script.idx + 1}"} de novo")
+                beginTask()
+                return@postDelayed
+            }
             baseU = 0
             sentAt = System.currentTimeMillis() - 30_000L
             enterWait(false)
@@ -229,11 +288,14 @@ class ScriptRunner(private val a: MainActivity) {
         if (Script.idx !in Script.items.indices) { finish(); return }
         val item = Script.items[Script.idx]
         item.state = Script.RUN
-        Script.log(a, "Tarefa ${Script.idx + 1} de $total iniciada: ${item.text.replace(Regex("\\s+"), " ").trim().take(60)}")
+        if (Script.mission) Script.log(a, "Missão: rodada ${Script.round} iniciada")
+        else Script.log(a, "Tarefa ${Script.idx + 1} de $total iniciada: ${item.text.replace(Regex("\\s+"), " ").trim().take(60)}")
         askCount = 0
         zipGot = false
         taskSent = false
-        taskBegan = false
+        setBegan(false)
+        Script.rejects = 0
+        pendingFix = ""
         Script.save(a)
         val g = gen
         val big = bigFile(Script.idx + 1, item.text)
@@ -246,11 +308,11 @@ class ScriptRunner(private val a: MainActivity) {
                 a.runOnUiThread {
                     if (g != gen || Script.status != Script.RUNNING) return@runOnUiThread
                     if (f == null) { failPause("Não consegui baixar o código do projeto no GitHub"); return@runOnUiThread }
-                    sendMessage(Script.firstMessage(ref, total), true, listOfNotNull(f, big))
+                    sendMessage(if (Script.mission) Script.missionFirst(ref) else Script.firstMessage(ref, total), true, listOfNotNull(f, big))
                 }
             }.start()
         } else {
-            sendMessage(Script.nextMessage(Script.idx + 1, total, ref), false, listOfNotNull(big))
+            sendMessage(if (Script.mission) Script.missionNext(Script.round) else Script.nextMessage(Script.idx + 1, total, ref), false, listOfNotNull(big))
         }
     }
 
@@ -261,6 +323,10 @@ class ScriptRunner(private val a: MainActivity) {
         val g = gen
         phase = Phase.SENDING
         taskSent = false
+        lastText = text
+        lastNew = newChat
+        lastAttach = attach
+        sendStartedAt = System.currentTimeMillis()
         lastAttachBytes = attach.sumOf { it.length() }
         // guarda a assinatura de tudo que o app anexa: se esse arquivo voltar como "entrega", é falso
         attach.forEach { f -> try { sentShas.add(Script.shaOf(f.readBytes())) } catch (_: Exception) { } }
@@ -421,8 +487,12 @@ class ScriptRunner(private val a: MainActivity) {
     private fun markSent(pageLen: Int = -1) {
         sentN = pageLen
         chatStarted = true
+        Script.chatStarted = true
         taskSent = true
-        taskBegan = true
+        setBegan(true)
+        Script.save(a)
+        sendStartedAt = 0L
+        sendRetries = 0
         sentAt = System.currentTimeMillis()
         Script.log(a, "Mensagem enviada ao Claude (tarefa ${Script.idx + 1})")
         lastAttachBytes = 0L
@@ -479,6 +549,10 @@ class ScriptRunner(private val a: MainActivity) {
             a.scrSnap(tab) { snap, active ->
                 if (g == gen && snap != null && snap.limit && active) onLimit()
             }
+        }
+        if (now - sentAt > 50 * 60_000L && Script.mission) {
+            failPause("A rodada ${Script.round} passou de 50 min sem terminar. Toque em Continuar para tentar de novo")
+            return
         }
         if (now - sentAt > 50 * 60_000L) {
             Script.items[Script.idx].state = Script.FAIL
@@ -567,11 +641,39 @@ class ScriptRunner(private val a: MainActivity) {
 
     private fun askOrFail(g: Int) {
         if (g != gen || Script.status != Script.RUNNING) return
-        if (askCount < 2) {
+        // missão: o Claude pode ter acabado de verdade (ZIP final já entregue antes) e só faltou aceitar
+        if (Script.mission && Script.zips.isNotEmpty() && pendingFix.isBlank()) {
+            readLast { text ->
+                if (g != gen || Script.status != Script.RUNNING) return@readLast
+                if (Mission.isComplete(text) || Mission.livingDone(a)) {
+                    Script.log(a, "O Claude declarou a missão concluída (sem ZIP novo nesta rodada)")
+                    missionFinish(true)
+                } else {
+                    askOrFailGo(g)
+                }
+            }
+            return
+        }
+        askOrFailGo(g)
+    }
+
+    private fun askOrFailGo(g: Int) {
+        if (g != gen || Script.status != Script.RUNNING) return
+        val maxAsk = if (Script.mission) 3 else 2
+        val where = if (Script.mission) "rodada ${Script.round}" else "tarefa ${Script.idx + 1}"
+        if (askCount < maxAsk) {
             askCount++
-            Script.log(a, "Sem ZIP na tarefa ${Script.idx + 1}: pedindo de novo ($askCount/2)")
-            status("Claude não entregou o ZIP: pedindo de novo ($askCount/2)…")
-            sendMessage(Script.askZip(Script.idx + 1), false, emptyList())
+            val msg = when {
+                pendingFix.isNotBlank() -> Script.zipFix(pendingFix)
+                Script.mission -> Script.missionAskZip(Script.round)
+                else -> Script.askZip(Script.idx + 1)
+            }
+            pendingFix = ""
+            Script.log(a, "Sem ZIP válido na $where: pedindo de novo ($askCount/$maxAsk)")
+            status("Claude não entregou um ZIP válido: pedindo de novo ($askCount/$maxAsk)…")
+            sendMessage(msg, false, emptyList())
+        } else if (Script.mission) {
+            failPause("O Claude não entregou um ZIP válido na $where depois de $maxAsk pedidos. Toque em Continuar para tentar de novo")
         } else {
             Script.items[Script.idx].state = Script.FAIL
             Script.save(a)
@@ -579,6 +681,14 @@ class ScriptRunner(private val a: MainActivity) {
             status("Sem ZIP na tarefa ${Script.idx + 1}: marcada como falha")
             nextTask()
         }
+    }
+
+    /** Texto da última resposta do Claude na aba do script. */
+    private fun readLast(cb: (String) -> Unit) {
+        val tab = a.scrTab(Script.chatTabId)
+        val w = if (tab != null) a.scrWeb(tab) else null
+        if (w == null) { cb(""); return }
+        w.evaluateJavascript(Handoff.READ_LAST_JS) { raw -> cb(Handoff.unquote(raw) ?: "") }
     }
 
     /** O ZIP baixado é algo que o PRÓPRIO app mandou ao Claude (código, pacote de continuação)? Então não é entrega. */
@@ -592,7 +702,7 @@ class ScriptRunner(private val a: MainActivity) {
                 var count = 0
                 while (e != null && count < 2000) {
                     val en = e.name.replace('\\', '/').trimStart('/')
-                    if (en == "LEIA-ME-PRIMEIRO.md" || en == "PROGRESSO-DO-SCRIPT.md" ||
+                    if (en == "LEIA-ME-PRIMEIRO.md" || en == "PROGRESSO-DO-SCRIPT.md" || en == "PLANO-ORIGINAL.md" || en == "diario-da-missao.txt" ||
                         en == "conversa-anterior.txt" || en.startsWith("chat-completo/")) return true
                     count++
                     e = zi.nextEntry
@@ -613,10 +723,23 @@ class ScriptRunner(private val a: MainActivity) {
             a.runOnUiThread { a.scrSay("Script: ignorei o ZIP que o app mandou") }
             return true
         }
+        // o ZIP está certo? (válido, sem trechos omitidos, XML válido…) Se não, não conta: o script pede a correção
+        val chk = Mission.check(a, bytes)
+        if (chk.hard.isNotEmpty() || (chk.soft.isNotEmpty() && Script.rejects < 1)) {
+            Script.rejects++
+            pendingFix = chk.all().joinToString("\n") { "- $it" }
+            Script.log(a, "ZIP recusado ($name): " + chk.all().joinToString("; ").take(300))
+            a.runOnUiThread { a.scrSay("Script: ZIP recusado, vou pedir a correção") }
+            return true
+        }
+        if (chk.soft.isNotEmpty()) Script.log(a, "ZIP aceito com avisos: " + chk.soft.joinToString("; ").take(300))
         val item = Script.idx
         val z = Script.addZip(a, item, name, bytes)
+        if (z != null) Mission.captureMeta(a, bytes)
         a.runOnUiThread {
             if (z != null) {
+                Script.rejects = 0
+                pendingFix = ""
                 Script.items.getOrNull(item)?.let { it.zips++ }
                 Script.save(a)
                 Script.log(a, "ZIP recebido na tarefa ${item + 1}: $name (${bytes.size / 1024} KB)")
@@ -633,7 +756,42 @@ class ScriptRunner(private val a: MainActivity) {
         return true
     }
 
+    /** Missão: o ZIP da rodada foi aceito. Terminou? Se não, pede o próximo passo no mesmo chat. */
+    private fun missionAfterZip(g: Int) {
+        // trava os ciclos de busca do ZIP: a leitura abaixo é assíncrona e não pode disparar duas rodadas
+        phase = Phase.IDLE
+        Script.save(a)
+        Script.log(a, "Rodada ${Script.round} concluída ✓ (${Script.zips.size} ZIP(s) guardado(s))")
+        readLast { text ->
+            if (g != gen || Script.status != Script.RUNNING) return@readLast
+            if (Mission.isComplete(text) || Mission.livingDone(a)) {
+                missionFinish(true)
+            } else if (Script.round >= Mission.MAX_ROUNDS) {
+                Script.log(a, "Limite de ${Mission.MAX_ROUNDS} rodadas atingido")
+                missionFinish(false)
+            } else {
+                Script.round++
+                zipGot = false
+                askCount = 0
+                Script.rejects = 0
+                pendingFix = ""
+                Script.save(a)
+                status("Rodada ${Script.round - 1} pronta. Pedindo a rodada ${Script.round}…")
+                sendMessage(Script.missionNext(Script.round), false, emptyList())
+            }
+        }
+    }
+
+    private fun missionFinish(ok: Boolean) {
+        Script.items.getOrNull(0)?.state = if (ok) Script.OK else Script.FAIL
+        Script.save(a)
+        Script.log(a, if (ok) "Missão concluída: o Claude entregou o ZIP final" else "Missão encerrada sem a confirmação final do Claude")
+        limitBusy = false
+        finish()
+    }
+
     private fun taskDone(state: Int) {
+        if (Script.mission && state == Script.OK) { missionAfterZip(gen); return }
         Script.items.getOrNull(Script.idx)?.state = state
         Script.save(a)
         Script.log(a, "Tarefa ${Script.idx + 1} concluída ✓")
@@ -660,7 +818,22 @@ class ScriptRunner(private val a: MainActivity) {
         val fail = Script.items.count { it.state == Script.FAIL }
         Script.log(a, "Script terminou: $ok ok, $fail falha(s), ${Script.zips.size} ZIP(s)")
         Projects.current(a)?.let { Handoff.log(a, it.id, "Script terminou: $ok ok, $fail falha(s), ${Script.zips.size} ZIP(s)") }
-        notify("Script concluído", "$ok de $total tarefa(s) ok · ${Script.zips.size} ZIP(s) para enviar")
+        if (Script.mission) {
+            // ZIP final já pronto em Downloads: é só subir no GitHub
+            Thread {
+                try {
+                    val f = Script.merged(a)
+                    if (f != null) {
+                        val bytes = f.readBytes()
+                        a.runOnUiThread { try { a.scrSave(bytes, f.name) } catch (_: Exception) { } }
+                        Script.log(a, "ZIP FINAL salvo em Downloads: ${f.name}")
+                    }
+                } catch (_: Exception) { }
+            }.start()
+            notify("Missão concluída", "${Script.round} rodada(s) · ZIP final salvo em Downloads, pronto para subir no GitHub")
+        } else {
+            notify("Script concluído", "$ok de $total tarefa(s) ok · ${Script.zips.size} ZIP(s) para enviar")
+        }
         a.scrShowPending()
     }
 
@@ -708,13 +881,38 @@ class ScriptRunner(private val a: MainActivity) {
     /** O ZIP da tarefa atual estava entregue: marca como concluída e deixa a PRÓXIMA para a conta que estiver livre. */
     private fun limitAfterZip(g: Int) {
         if (g != gen || Script.status != Script.RUNNING) return
+        if (Script.mission) {
+            Script.log(a, "Rodada ${Script.round}: o ZIP já estava entregue antes do limite ✓")
+            readLast { text ->
+                if (g != gen || Script.status != Script.RUNNING) return@readLast
+                val done = Mission.isComplete(text) || Mission.livingDone(a)
+                if (done || Script.round >= Mission.MAX_ROUNDS) {
+                    missionFinish(done)
+                    return@readLast
+                }
+                Script.round++
+                setBegan(false)
+                taskSent = false
+                zipGot = false
+                askCount = 0
+                Script.rejects = 0
+                pendingFix = ""
+                Script.partial = ""
+                Script.partialIdx = -1
+                Script.save(a)
+                status("Rodada ${Script.round - 1} pronta. Procurando conta liberada para a rodada ${Script.round}…")
+                phase = Phase.LIMIT_WAIT
+                limitLoop(g)
+            }
+            return
+        }
         Script.items.getOrNull(Script.idx)?.state = Script.OK
         Script.save(a)
         Script.log(a, "Tarefa ${Script.idx + 1} já estava entregue antes do limite ✓")
         val next = (Script.idx + 1 until Script.items.size).firstOrNull { Script.items[it].state == Script.PEND }
         if (next == null) { limitBusy = false; finish(); return }
         Script.idx = next
-        taskBegan = false
+        setBegan(false)
         taskSent = false
         zipGot = false
         Script.partial = ""
@@ -742,7 +940,7 @@ class ScriptRunner(private val a: MainActivity) {
         val now = System.currentTimeMillis()
         val tabs = a.scrTabs().filter { !it.parked || it.id == from.id }
         val free = tabs.filter { it.id != from.id && it.until <= now }.minByOrNull { it.until }
-        if (free != null) { doHandoff(from, free, g); return }
+        if (free != null) { probeThenHandoff(from, free, g); return }
         if (from.until <= now) {
             // a mesma conta voltou: confere e segue no mesmo chat
             a.scrSnap(from) { snap, active ->
@@ -762,6 +960,55 @@ class ScriptRunner(private val a: MainActivity) {
 
         notify("Script esperando o limite", txt)
         h.postDelayed({ limitLoop(g) }, 20_000)
+    }
+
+    /**
+     * Antes de levar o projeto: a conta de destino abre o Claude, está logada e NÃO está em limite?
+     * Se não, marca o motivo nela e tenta a próxima (nunca fica preso numa conta ruim).
+     */
+    private fun probeThenHandoff(from: Tab, to: Tab, g: Int) {
+        status("Conferindo se a conta \"${to.name}\" está liberada…")
+        probeTab(to, g) { verdict ->
+            if (g != gen || Script.status != Script.RUNNING) return@probeTab
+            when (verdict) {
+                "ok" -> doHandoff(from, to, g)
+                "limit" -> {
+                    Script.log(a, "Conta \"${to.name}\" ainda está em limite; tentando outra")
+                    limitLoop(g)
+                }
+                else -> {
+                    Script.log(a, "Conta \"${to.name}\" não abriu o Claude (deslogada ou sem internet?); pulando por 2 h")
+                    a.scrSetUntil(to, System.currentTimeMillis() + 2 * 3600_000L)
+                    limitLoop(g)
+                }
+            }
+        }
+    }
+
+    /** cb("ok" | "limit" | "error"). Tem prazo de 60 s: uma conta deslogada nunca trava o script. */
+    private fun probeTab(t: Tab, g: Int, cb: (String) -> Unit) {
+        var finished = false
+        fun end(v: String) {
+            if (finished) return
+            finished = true
+            t.holdUntil = 0L
+            cb(v)
+        }
+        val w = a.scrWebOpen(t)
+        a.scrSelect(t)
+        t.holdUntil = System.currentTimeMillis() + 20_000L
+        w.loadUrl("https://claude.ai/new")
+        h.postDelayed({ end("error") }, 60_000L)
+        a.scrWaitReady(w, "claude.ai/new", { g == gen && Script.status == Script.RUNNING && !finished }) { ready ->
+            if (finished) return@scrWaitReady
+            if (!ready) { end("error"); return@scrWaitReady }
+            t.holdUntil = 0L
+            a.scrSnap(t) { snap, active ->
+                if (snap == null || !snap.url.contains("claude.ai")) end("error")
+                else if (snap.limit && active) end("limit")
+                else end("ok")
+            }
+        }
     }
 
     private fun resumeSameChat(tab: Tab, g: Int) {
@@ -828,8 +1075,11 @@ class ScriptRunner(private val a: MainActivity) {
 
         val item = Script.items[Script.idx]
         val big = bigFile(Script.idx + 1, item.text)
-        val msg = Script.handoffMessage(Script.idx + 1, total, taskRef(item.text, big), begun)
+        val msg = if (Script.mission) Script.missionHandoff(Script.round, begun)
+                  else Script.handoffMessage(Script.idx + 1, total, taskRef(item.text, big), begun)
         chatStarted = true
+        Script.chatStarted = true
+        Script.save(a)
         Script.log(a, if (begun) "Conta \"${to.name}\": continuando a tarefa ${Script.idx + 1} de onde parou" else "Conta \"${to.name}\": começando a tarefa ${Script.idx + 1}")
         status("Continuando na conta \"${to.name}\"…")
         gen++
@@ -894,6 +1144,7 @@ class ScriptRunner(private val a: MainActivity) {
             }
         }
         try { sentShas.add(Script.shaOf(out.readBytes())) } catch (_: Exception) { }
+        Mission.saveBase(a, out)
         return out
     }
 

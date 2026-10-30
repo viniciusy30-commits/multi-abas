@@ -1211,7 +1211,12 @@ window.addEventListener('click',function(e){
         if (key.isNotEmpty() && key == t.limitSrc) return t.until > now
         val at = LimitTime.parse(key, now)
         return when (at) {
-            LimitTime.UNKNOWN -> { limitLearned.add(t.id); true }
+            LimitTime.UNKNOWN -> {
+                limitLearned.add(t.id)
+                // aviso sem horário: assume 30 min e confere de novo depois. Assim a conta nunca parece "liberada" enquanto está em limite
+                if (t.until <= now) { t.until = now + 30 * 60_000L; save(); tickNow() }
+                true
+            }
             LimitTime.PASSED -> { t.limitSrc = key; t.until = 0L; save(); tickNow(); false }
             else -> { t.limitSrc = key; t.until = at; save(); tickNow(); true }
         }

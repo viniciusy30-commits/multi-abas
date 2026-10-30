@@ -1,3 +1,13 @@
+#id 2026-10-30-b
+#titulo Missão automática + continuação que não perde o plano
+- Novo: Missão automática (Script > Modo automático). Você descreve o pedido UMA vez; o app conduz o Claude em rodadas, aceita cada ZIP, e termina com o ZIP final já salvo em Downloads, pronto para subir no GitHub
+- O pedido original fica salvo no aparelho palavra por palavra (PLANO-ORIGINAL.md) e o Claude mantém um PLANO-VIVO.md dentro de cada ZIP (passos [x] e [ ], decisões e próximo passo). É isso que a conta nova lê para continuar, em vez de depender só de ler o chat
+- Diário da missão: contas usadas, limites, ZIPs aceitos e recusados. Dá para ver o plano original, o plano vivo e o diário no painel do Script
+- ZIP conferido antes de contar: se vier corrompido, com "..." ou "resto do código igual", XML quebrado ou arquivo muito menor que o original, o app recusa e pede a correção ao Claude. Pasta embrulhando tudo é tirada sozinha
+- Troca de conta mais segura: antes de levar o projeto, o app abre a conta de destino e confere se está logada e fora do limite; se não estiver, pula para a próxima. Limite sem horário no aviso agora vale 30 min em vez de a conta parecer liberada
+- O pacote para a outra conta usa a cópia do código guardada no aparelho se o GitHub falhar
+- Se o app fechar no meio, a missão retoma de onde estava (sem reenviar a tarefa). Envio travado por 10 min é refeito sozinho
+
 #id 2026-10-30-a
 #titulo Abas mais limpas, aba guardada e + direto
 - Faixa de abas redesenhada: cada conta é um cartão compacto com bolinha de estado (verde = liberada, laranja = em recarga com o tempo que falta). Nada mais cortado embaixo
