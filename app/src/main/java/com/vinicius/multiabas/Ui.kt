@@ -154,7 +154,9 @@ class Sheet(private val ctx: Context) {
     fun row(
         icon: Int, title: String, sub: String? = null,
         highlighted: Boolean = false, danger: Boolean = false,
-        onMore: (() -> Unit)? = null, onClick: () -> Unit
+        onMore: (() -> Unit)? = null,
+        leading: View? = null, subColor: Int? = null,
+        onClick: () -> Unit
     ): Sheet {
         val line = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -170,7 +172,7 @@ class Sheet(private val ctx: Context) {
         }
         val tint = if (danger) cDanger else if (highlighted) cAccent else cText
         val bubble = if (danger) 0x22FF6B6B else if (highlighted) 0x33D97757 else cSurface2
-        line.addView(iconBubble(icon, tint, bubble), LinearLayout.LayoutParams(Ui.dp(ctx, 40), Ui.dp(ctx, 40)))
+        line.addView(leading ?: iconBubble(icon, tint, bubble), LinearLayout.LayoutParams(Ui.dp(ctx, 40), Ui.dp(ctx, 40)))
 
         val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         col.addView(TextView(ctx).apply {
@@ -185,7 +187,7 @@ class Sheet(private val ctx: Context) {
             col.addView(TextView(ctx).apply {
                 text = sub
                 textSize = 12f
-                setTextColor(cMuted)
+                setTextColor(subColor ?: cMuted)
                 maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
             })
@@ -263,6 +265,14 @@ class Sheet(private val ctx: Context) {
         }
         return this
     }
+
+    /** Chamado quando o usuário fecha a folha sem escolher nada (arrastar, voltar, tocar fora). */
+    fun onCancel(cb: () -> Unit): Sheet {
+        dialog.setOnCancelListener { cb() }
+        return this
+    }
+
+    fun raw(): android.app.Dialog = dialog
 
     fun show() {
         val scroll = NestedScrollView(ctx)

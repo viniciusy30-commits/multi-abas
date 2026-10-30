@@ -65,7 +65,6 @@ class ScriptUi(private val a: MainActivity, private val runner: ScriptRunner) {
 
         if (Script.items.isNotEmpty() || Script.events.isNotEmpty()) {
             sh.section("Acompanhar")
-            sh.row(R.drawable.ic_timer, "Uso das contas (0–100%)", "Quanto cada conta já usou, ao vivo") { a.usageMon.ui.show() }
             sh.row(R.drawable.ic_info, "Relatório ao vivo", "O que já foi feito, ZIPs e linha do tempo", highlighted = running) { showReport() }
         }
 

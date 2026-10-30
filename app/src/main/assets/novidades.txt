@@ -1,3 +1,13 @@
+#id 2026-10-30-a
+#titulo Abas mais limpas, aba guardada e + direto
+- Faixa de abas redesenhada: cada conta é um cartão compacto com bolinha de estado (verde = liberada, laranja = em recarga com o tempo que falta). Nada mais cortado embaixo
+- Novo botão de grade ao lado do +: tela Contas com tudo separado em Liberadas, Em recarga e Guardadas
+- Guardar aba (segure a aba): trava a conta para continuar depois. Ela sai da faixa, descarrega a página e o Script e a troca de conta nunca usam. Toque nela em Contas para destravar
+- Anotação por conta: escreva em que projeto ela está ou onde você parou
+- Tocar no + do Claude agora abre direto a escolha entre foto/vídeo e arquivo (arquivo abre em Downloads, mais novos primeiro). Segure o + para o menu de sempre. Dá para desligar em Ajustes
+- Enviar main agora anexa sozinho pelo mesmo caminho do Script (campo de arquivo, arrastar, menu do +) e confere se o anexo apareceu
+- Removido o medidor de uso 0–100%, que não funcionava
+
 #id 2026-10-27-h
 #titulo Script não dá mais ZIP errado como entregue + medidor mais preciso
 - Corrige: o Script pegava o próprio ZIP do código (codigo-...zip, o que o app manda) como se fosse a entrega do Claude e dava a tarefa como concluída quando o limite acabava. Agora ele ignora esse ZIP e troca de conta para continuar

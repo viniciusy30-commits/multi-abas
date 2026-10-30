@@ -30,6 +30,10 @@ class Tab(val id: String, var name: String, var url: String, var until: Long = 0
     var limitSrc: String = ""
     /** Até quando ignorar o aviso da página (logo depois de recarregar a aba). */
     var holdUntil: Long = 0L
+    /** Aba guardada (travada): não carrega, não entra no rodízio do Script nem nas trocas de conta. */
+    var parked: Boolean = false
+    /** Anotação livre: em que projeto a conta estava / onde parou. */
+    var note: String = ""
 }
 
 class MainActivity : AppCompatActivity() {
@@ -61,7 +65,7 @@ class MainActivity : AppCompatActivity() {
         DockAct("game", "Abrir jogo", R.drawable.ic_play) { openCurrentGame() },
         DockAct("reload", "Recarregar", R.drawable.ic_refresh) { webs[tabs[cur].id]?.reload() },
         DockAct("projects", "Projetos", R.drawable.ic_folder) { projectPicker() },
-        DockAct("usage", "Uso das contas", R.drawable.ic_timer) { usageMon.ui.show() },
+        DockAct("accounts", "Contas", R.drawable.ic_grid) { showAccounts() },
         DockAct("handoff", "Outra conta", R.drawable.ic_refresh) { manualHandoff() },
         DockAct("paste", "Texto grande", R.drawable.ic_send) { pasteLargeText() },
         DockAct("settings", "Ajustes", R.drawable.ic_settings) { settings() },
@@ -131,16 +135,15 @@ class MainActivity : AppCompatActivity() {
 
         // Caso geral: pergunta se é foto/vídeo (galeria) ou arquivo (gerenciador, pasta Downloads)
         return try {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Anexar")
-                .setItems(arrayOf("🖼️  Foto ou vídeo", "📁  Arquivo")) { _, which ->
-                    if (which == 0) launchGallery(multi) else launchFilePicker(types, multi)
-                }
-                .setOnCancelListener {
-                    fileCb?.onReceiveValue(null)
-                    fileCb = null
-                }
-                .show().also { trackDlg(it) }
+            val sh = Sheet(this).title("Anexar", "O que você quer enviar?")
+            sh.row(R.drawable.ic_image, "Foto ou vídeo", "Abre a galeria do celular", highlighted = true) { launchGallery(multi) }
+            sh.row(R.drawable.ic_folder, "Arquivo", "Abre a pasta Downloads, os mais recentes primeiro") { launchFilePicker(types, multi) }
+            sh.onCancel {
+                fileCb?.onReceiveValue(null)
+                fileCb = null
+            }
+            sh.show()
+            trackDlg(sh.raw())
             true
         } catch (_: Exception) {
             fileCb = null
@@ -180,10 +183,12 @@ class MainActivity : AppCompatActivity() {
                     putExtra(Intent.EXTRA_MIME_TYPES, mimes.toTypedArray())
                 }
                 if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    // Raiz "Downloads" do próprio sistema: o seletor abre nela e lista por data (mais novos no topo).
+                    // É só uma sugestão: se o gerenciador do celular não entender, ele abre onde abriria normalmente.
                     putExtra(
                         android.provider.DocumentsContract.EXTRA_INITIAL_URI,
                         android.provider.DocumentsContract.buildDocumentUri(
-                            "com.android.externalstorage.documents", "primary:Download"
+                            "com.android.providers.downloads.documents", "downloads"
                         )
                     )
                 }
@@ -218,6 +223,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<ImageButton>(R.id.btnFavAdd).setOnClickListener { addToDock() }
         loadFavs()
         findViewById<ImageButton>(R.id.btnAdd).setOnClickListener { addTab() }
+        findViewById<ImageButton>(R.id.btnAccounts).setOnClickListener { showAccounts() }
         findViewById<ImageButton>(R.id.btnMenu).setOnClickListener { showMenu() }
         findViewById<ImageButton>(R.id.btnReload).setOnClickListener { webs[tabs[cur].id]?.reload() }
         urlBar.setOnFocusChangeListener { _, has ->
@@ -239,8 +245,6 @@ class MainActivity : AppCompatActivity() {
         if (!profilesOk) say("Seu WebView não separa contas. Atualize o \"Android System WebView\" na Play Store.", true)
         select(cur)
         Script.load(this)
-        Usage.load(this)
-        Est.load(this)
         if (Script.status == Script.RUNNING) scr.resumeAfterRestart()
         Updater.autoCheck(this)
         Novidades.show(this, false)
@@ -258,16 +262,30 @@ class MainActivity : AppCompatActivity() {
             val a = JSONArray(prefs.getString("tabs", "[]"))
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
-                tabs.add(Tab(o.getString("id"), o.getString("name"), o.getString("url"), o.optLong("until", 0L)).also { it.limitSrc = o.optString("limitSrc", "") })
+                tabs.add(Tab(o.getString("id"), o.getString("name"), o.getString("url"), o.optLong("until", 0L)).also {
+                    it.limitSrc = o.optString("limitSrc", "")
+                    it.parked = o.optBoolean("parked", false)
+                    it.note = o.optString("note", "")
+                })
             }
         } catch (e: Exception) { }
         if (tabs.isEmpty()) tabs.add(newTab("Conta 1"))
         cur = prefs.getInt("cur", 0).coerceIn(0, tabs.size - 1)
+        // nunca abre numa aba guardada; se todas estiverem guardadas, destrava a primeira
+        if (tabs[cur].parked) {
+            val ok = tabs.indexOfFirst { !it.parked }
+            if (ok >= 0) {
+                cur = ok
+            } else {
+                tabs[0].parked = false
+                cur = 0
+            }
+        }
     }
 
     private fun save() {
         val a = JSONArray()
-        tabs.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url).put("until", it.until).put("limitSrc", it.limitSrc)) }
+        tabs.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("url", it.url).put("until", it.until).put("limitSrc", it.limitSrc).put("parked", it.parked).put("note", it.note)) }
         prefs.edit().putString("tabs", a.toString()).putInt("cur", cur).apply()
     }
 
@@ -320,6 +338,10 @@ class MainActivity : AppCompatActivity() {
     private val dlTokens: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet<String>())
 
     inner class Bridge {
+        /** O JS do botão + pergunta se deve abrir o seletor direto (desligado enquanto o app mesmo está anexando). */
+        @JavascriptInterface
+        fun plusOn(): Boolean = prefs.getBoolean("plus_direct", true) && pendingClaudeFile == null
+
         @JavascriptInterface
         fun save(token: String, dataUrl: String, mime: String, name: String) {
             if (!dlTokens.remove(token)) return
@@ -440,7 +462,139 @@ class MainActivity : AppCompatActivity() {
 
     private val HOOK_JS = """(function(){if(window.__dlHook)return;window.__dlHook=1;var oc=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){try{if(this.download)window.__lastDl=this.download;}catch(e){}return oc.apply(this,arguments);};var od=EventTarget.prototype.dispatchEvent;EventTarget.prototype.dispatchEvent=function(ev){try{if(this instanceof HTMLAnchorElement&&ev&&ev.type==='click'&&this.download)window.__lastDl=this.download;}catch(e){}return od.apply(this,arguments);};document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[download]'):null;if(a&&a.download)window.__lastDl=a.download;},true);})();"""
 
-    private fun hook(v: WebView) { v.evaluateJavascript(HOOK_JS, null) }
+    private fun hook(v: WebView) {
+        v.evaluateJavascript(HOOK_JS, null)
+        v.evaluateJavascript(PLUS_JS, null)
+    }
+
+    /**
+     * Botão + do compositor do Claude: toque rápido abre direto o seletor (foto ou arquivo) em vez do menu;
+     * segurar o + abre o menu original (conectores, projetos…). Só reage a toques de verdade (isTrusted).
+     * O arquivo escolhido é colocado no campo de arquivo do próprio Claude (ou arrastado para a caixa de mensagem).
+     */
+    private val PLUS_JS = """(function(){
+if(window.__plusHook||location.hostname.indexOf('claude.ai')<0)return;
+window.__plusHook=1;
+var LONG=450,bypass=false,longHit=false,timer=null;
+function on(){try{return !!(window.AndroidDl&&AndroidDl.plusOn&&AndroidDl.plusOn());}catch(e){return false;}}
+var BAD=/send|enviar|mic|voz|voice|audio|dict|stop|parar|model|modelo|chat|task|tarefa/i;
+var NEG=/remov|delet|exclu|clos|fech|clear|limpar|cancel|dismiss|preview|download|baixar/i;
+function plusBtn(t){var b=cand(t);return (b&&on())?b:null;}
+function cand(t){
+ if(!t||!t.closest)return null;
+ var b=t.closest('button,[role="button"]');
+ if(!b)return null;
+ var ed=document.querySelector('div[contenteditable="true"]');
+ if(!ed)return null;
+ var root=null,p=ed;
+ for(var i=0;i<10&&p;i++){p=p.parentElement;if(p&&p.contains(b)){root=p;break;}}
+ if(!root)return null;
+ var a=(b.getAttribute('aria-label')||'')+' '+(b.getAttribute('data-testid')||'');
+ if(NEG.test(a))return null;
+ if(/input-menu-plus|add files|add photos|adicionar arquivos|adicionar fotos|attachment|anexo|anexar|attach/i.test(a))return b;
+ if(BAD.test(a)||(b.innerText||'').trim().length>0)return null;
+ var bs=root.querySelectorAll('button'),best=null,bl=1e9;
+ for(var j=0;j<bs.length;j++){
+  var r=bs[j].getBoundingClientRect();if(r.width<4||r.height<4)continue;
+  var al=(bs[j].getAttribute('aria-label')||'')+' '+(bs[j].getAttribute('data-testid')||'');
+  if(BAD.test(al)||(bs[j].innerText||'').trim().length>0)continue;
+  if(r.left<bl){bl=r.left;best=bs[j];}
+ }
+ return best===b?b:null;
+}
+function stop(e){try{e.stopImmediatePropagation();}catch(x){}try{e.stopPropagation();}catch(x){}}
+function accepts(inp,fl){
+ var a=(inp.getAttribute('accept')||'').toLowerCase().trim();
+ if(!a||a.indexOf('*/*')>=0)return true;
+ var toks=a.split(',').map(function(x){return x.trim();});
+ for(var i=0;i<fl.length;i++){
+  var n=(fl[i].name||'').toLowerCase(),ty=(fl[i].type||'').toLowerCase(),ok=false;
+  for(var k=0;k<toks.length&&!ok;k++){
+   var t=toks[k];if(!t)continue;
+   if(t.charAt(0)==='.')ok=n.length>=t.length&&n.lastIndexOf(t)===n.length-t.length;
+   else if(t.slice(-2)==='/*')ok=ty.indexOf(t.slice(0,-1))===0;
+   else ok=ty===t;
+  }
+  if(!ok)return false;
+ }
+ return true;
+}
+function drop(dt){
+ var ed=document.querySelector('div[contenteditable="true"]');if(!ed)return;
+ var t=ed.closest('fieldset,form')||ed.parentElement||ed;
+ ['dragenter','dragover','drop'].forEach(function(n){t.dispatchEvent(new DragEvent(n,{bubbles:true,cancelable:true,dataTransfer:dt}));});
+}
+function deliver(fl){
+ var dt=new DataTransfer();
+ fl.forEach(function(f){try{dt.items.add(f);}catch(x){}});
+ var ins=document.querySelectorAll('input[type=file]'),pick=null,first=null;
+ for(var j=0;j<ins.length;j++){
+  if(ins[j].getAttribute('data-multiabas'))continue;
+  if(!first)first=ins[j];
+  if(accepts(ins[j],fl)){pick=ins[j];break;}
+ }
+ if(!pick)pick=first;
+ if(!pick){drop(dt);return;}
+ pick.files=dt.files;
+ pick.dispatchEvent(new Event('input',{bubbles:true}));
+ pick.dispatchEvent(new Event('change',{bubbles:true}));
+ // arquivo que não é imagem aparece pelo nome no chat; se não apareceu, tenta arrastar para a caixa
+ var f0=null;
+ for(var i=0;i<fl.length;i++){if((fl[i].type||'').indexOf('image/')!==0){f0=fl[i];break;}}
+ if(!f0)return;
+ var base=(f0.name||'').replace(/\.[^.]*$/,'');if(base.length>20)base=base.substring(0,20);
+ if(!base)return;
+ setTimeout(function(){
+  if(((document.body&&document.body.innerText)||'').indexOf(base)<0)drop(dt);
+ },2500);
+}
+function openPicker(){
+ var inp=document.createElement('input');
+ inp.type='file';inp.multiple=true;inp.setAttribute('data-multiabas','1');
+ inp.style.cssText='position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+ document.body.appendChild(inp);
+ var gone=function(ms){setTimeout(function(){try{inp.remove();}catch(x){}},ms);};
+ inp.addEventListener('change',function(){
+  var fl=inp.files?Array.prototype.slice.call(inp.files):[];
+  if(fl.length)deliver(fl);
+  gone(4000);
+ });
+ inp.addEventListener('cancel',function(){gone(500);});
+ inp.click();
+ gone(120000);
+}
+window.addEventListener('pointerdown',function(e){
+ if(bypass||!e.isTrusted)return;
+ longHit=false;clearTimeout(timer);
+ var b=plusBtn(e.target);if(!b)return;
+ stop(e);try{e.preventDefault();}catch(x){}
+ timer=setTimeout(function(){
+  longHit=true;bypass=true;
+  try{b.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,pointerType:'touch',button:0,isPrimary:true}));}catch(x){}
+  try{b.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,button:0}));}catch(x){}
+  bypass=false;
+  try{if(navigator.vibrate)navigator.vibrate(15);}catch(x){}
+ },LONG);
+},true);
+['pointerup','pointercancel','touchend','touchcancel'].forEach(function(n){
+ window.addEventListener(n,function(){clearTimeout(timer);},true);
+});
+['mousedown','mouseup','touchstart'].forEach(function(n){
+ window.addEventListener(n,function(e){
+  if(bypass||!e.isTrusted)return;
+  if(plusBtn(e.target))stop(e);
+ },true);
+});
+window.addEventListener('contextmenu',function(e){if(plusBtn(e.target)){e.preventDefault();stop(e);}},true);
+window.addEventListener('click',function(e){
+ if(bypass||!e.isTrusted)return;
+ var b=plusBtn(e.target);if(!b)return;
+ stop(e);try{e.preventDefault();}catch(x){}
+ clearTimeout(timer);
+ if(longHit){longHit=false;return;}
+ openPicker();
+},true);
+})();"""
 
     private fun githubToChrome(v: WebView, r: WebResourceRequest): Boolean {
         if (!r.isForMainFrame) return false
@@ -469,6 +623,7 @@ class MainActivity : AppCompatActivity() {
         closeFav()
         cur = i
         val t = tabs[i]
+        t.parked = false // abrir uma aba guardada = destravar
         val w = webFor(t)
         for (k in 0 until container.childCount) container.getChildAt(k).visibility = View.GONE
         w.alpha = 0f; w.visibility = View.VISIBLE
@@ -546,13 +701,19 @@ class MainActivity : AppCompatActivity() {
     private fun tabOptions(i: Int) {
         if (i < 0 || i >= tabs.size) return
         val t = tabs[i]
-        val sh = Sheet(this).title(t.name, "Conta separada, com login e cookies próprios")
+        val sh = Sheet(this).title(t.name, if (t.parked) "Guardada · conta travada" else "Conta separada, com login e cookies próprios")
+        if (t.parked) {
+            sh.row(R.drawable.ic_lock, "Destravar e abrir", "Volta para a faixa de contas", highlighted = true) { unparkAndOpen(t) }
+        } else {
+            sh.row(R.drawable.ic_lock, "Guardar aba (travar)", "Para continuar depois: não carrega e o Script não usa") { parkTab(t) }
+        }
+        sh.row(R.drawable.ic_edit, "Anotação", if (t.note.isBlank()) "Em que projeto está / onde parou" else t.note) { editNote(t) }
         sh.row(R.drawable.ic_edit, "Renomear") {
             input("Renomear aba", t.name) { t.name = it; refreshRows(); save() }
         }
-        sh.row(R.drawable.ic_refresh, "Recarregar") { webs[t.id]?.reload() }
+        if (!t.parked) sh.row(R.drawable.ic_refresh, "Recarregar") { webs[t.id]?.reload() }
         sh.row(R.drawable.ic_star, "Foto da conta", if (Avatars.has(this, t.id)) "Trocar ou remover a foto" else "Escolher uma foto da galeria no lugar da letra") { photoOptions(t) }
-        sh.row(R.drawable.ic_send, "Continuar em outra conta", "Leva o projeto e a conversa desta aba") { chooseTarget(t) }
+        if (!t.parked) sh.row(R.drawable.ic_send, "Continuar em outra conta", "Leva o projeto e a conversa desta aba") { chooseTarget(t) }
         sh.row(R.drawable.ic_timer, "Definir volta do limite", "Mostra um cronômetro na aba") {
             val idx = tabs.indexOf(t)
             if (idx >= 0) pickLimit(idx)
@@ -576,7 +737,133 @@ class MainActivity : AppCompatActivity() {
         webs.remove(t.id)?.let { container.removeView(it); it.destroy() }
         try { if (profilesOk) ProfileStore.getInstance().deleteProfile("p_" + t.id) } catch (e: Exception) { }
         if (tabs.isEmpty()) tabs.add(newTab("Conta 1"))
-        select(minOf(i, tabs.size - 1))
+        select(nearestActive(minOf(i, tabs.size - 1)))
+    }
+
+    /** Índice da aba ativa (não guardada) mais perto de [i]. */
+    private fun nearestActive(i: Int): Int {
+        if (tabs.isEmpty()) return 0
+        val from = i.coerceIn(0, tabs.size - 1)
+        for (d in 0 until tabs.size) {
+            val a = from + d
+            if (a < tabs.size && !tabs[a].parked) return a
+            val b = from - d
+            if (b >= 0 && !tabs[b].parked) return b
+        }
+        return from
+    }
+
+    // ───────────── Guardar (travar) abas ─────────────
+
+    /** Trava a aba: some da faixa, descarrega a página (libera memória) e o Script/troca de conta não usam. O login continua salvo. */
+    private fun parkTab(t: Tab) {
+        if ((Script.status == Script.RUNNING || Script.status == Script.PAUSED) && Script.chatTabId == t.id) {
+            say("O Script está usando \"${t.name}\". Pare o Script antes de guardar.", true)
+            return
+        }
+        if (tabs.none { !it.parked && it !== t }) {
+            say("Deixe pelo menos uma conta ativa.", true)
+            return
+        }
+        t.parked = true
+        webs.remove(t.id)?.let { container.removeView(it); it.destroy() }
+        save()
+        if (tabs.getOrNull(cur) === t) select(nearestActive(tabs.indexOf(t))) else refreshRows()
+        say("\"${t.name}\" guardada 🔒  Fica em Contas para continuar depois")
+    }
+
+    private fun unparkAndOpen(t: Tab) {
+        val idx = tabs.indexOf(t)
+        if (idx < 0) return
+        select(idx) // select já destrava
+        say("\"${t.name}\" destravada ✓")
+    }
+
+    private fun editNote(t: Tab) {
+        val (til, e) = Ui.field(this, "Ex.: Jogo X — parei na fase 3", t.note)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(24), dp(8), dp(24), 0)
+        box.addView(til)
+        MaterialAlertDialogBuilder(this).setTitle("Anotação de \"${t.name}\"")
+            .setMessage("Em que projeto essa conta está ou onde você parou. Aparece na tela Contas.")
+            .setView(box)
+            .setPositiveButton("Salvar") { _, _ ->
+                t.note = e.text.toString().trim()
+                save(); refreshRows()
+            }
+            .setNegativeButton("Cancelar", null).show()
+        e.requestFocus()
+    }
+
+    private fun accountsSub(): String {
+        val now = System.currentTimeMillis()
+        val free = tabs.count { !it.parked && it.until <= now }
+        val cool = tabs.count { !it.parked && it.until > now }
+        val parked = tabs.count { it.parked }
+        return "$free liberadas · $cool em recarga · $parked guardadas"
+    }
+
+    private fun accountAvatar(t: Tab): View {
+        val tv = TextView(this)
+        tv.gravity = android.view.Gravity.CENTER
+        tv.setTextColor(Color.WHITE)
+        tv.textSize = 15f
+        tv.setTypeface(tv.typeface, android.graphics.Typeface.BOLD)
+        Ui.avatar(tv, t.name)
+        val bmp = Avatars.get(this, t.id)
+        if (bmp != null) {
+            tv.text = ""
+            tv.background = android.graphics.drawable.BitmapDrawable(resources, bmp)
+        }
+        return tv
+    }
+
+    /** Visão geral de todas as contas, separadas em liberadas, em recarga e guardadas. */
+    private fun showAccounts() {
+        val now = System.currentTimeMillis()
+        val free = tabs.filter { !it.parked && it.until <= now }
+        val cool = tabs.filter { !it.parked && it.until > now }.sortedBy { it.until }
+        val parked = tabs.filter { it.parked }
+        val sh = Sheet(this).title("Contas", accountsSub())
+        fun addRows(list: List<Tab>, kind: Int) {
+            for (t in list) {
+                val note = if (t.note.isBlank()) "" else " · " + t.note
+                val sub: String
+                val color: Int
+                when (kind) {
+                    0 -> { sub = "Liberada$note"; color = C_FREE }
+                    1 -> {
+                        val left = t.until - now
+                        val h = left / 3_600_000L
+                        val m = (left % 3_600_000L) / 60_000L
+                        val falta = if (h > 0) "${h}h${m.toString().padStart(2, '0')}" else "${m}min"
+                        sub = returnLabel(t.until) + " (falta $falta)" + note
+                        color = C_COOL
+                    }
+                    else -> { sub = "🔒 Guardada$note · toque para destravar"; color = C_PARK }
+                }
+                sh.row(
+                    R.drawable.ic_lock, t.name, sub,
+                    highlighted = tabs.getOrNull(cur) === t,
+                    onMore = { val idx = tabs.indexOf(t); if (idx >= 0) tabOptions(idx) },
+                    leading = accountAvatar(t), subColor = color
+                ) {
+                    if (kind == 2) unparkAndOpen(t)
+                    else { val idx = tabs.indexOf(t); if (idx >= 0) select(idx) }
+                }
+            }
+        }
+        if (free.isNotEmpty()) { sh.section("Liberadas (${free.size})"); addRows(free, 0) }
+        if (cool.isNotEmpty()) { sh.section("Em recarga (${cool.size})"); addRows(cool, 1) }
+        if (parked.isNotEmpty()) {
+            sh.section("Guardadas (${parked.size})")
+            sh.note("Contas travadas: não carregam, o Script não usa e não entram na troca de conta. Ficam aqui para você continuar depois.")
+            addRows(parked, 2)
+        }
+        sh.section("Nova")
+        sh.row(R.drawable.ic_add, "Adicionar conta", "Outra aba com login separado") { addTab() }
+        sh.show()
     }
 
     private fun showMenu() {
@@ -601,7 +888,7 @@ class MainActivity : AppCompatActivity() {
         ))
         sh.section("Automação")
         sh.row(R.drawable.ic_play, "Script de tarefas", scriptSub(), highlighted = Script.status == Script.RUNNING) { scr.ui.showPanel() }
-        sh.row(R.drawable.ic_timer, "Uso das contas (0–100%)", usageSub()) { usageMon.ui.show() }
+        sh.row(R.drawable.ic_grid, "Contas", accountsSub()) { showAccounts() }
         sh.section("Limite acabou?")
         sh.row(R.drawable.ic_refresh, "Continuar em outra conta", "Salva o chat completo, imagens e código num ZIP e leva para outra aba") { manualHandoff() }
         sh.section("Texto grande")
@@ -623,6 +910,10 @@ class MainActivity : AppCompatActivity() {
             R.drawable.ic_bolt, "Segundo plano", "Mantém o Claude rodando ao minimizar",
             prefs.getBoolean("keepalive", true)
         ) { on -> setKeepAlive(on) }
+        sh.switchRow(
+            R.drawable.ic_add, "Botão + abre direto", "Tocar no + do Claude já abre foto ou arquivo; segure o + para o menu de sempre",
+            prefs.getBoolean("plus_direct", true)
+        ) { on -> prefs.edit().putBoolean("plus_direct", on).apply(); say(if (on) "+ abre direto foto ou arquivo" else "+ volta a abrir o menu do Claude") }
         sh.switchRow(
             R.drawable.ic_code, "Salvar andamento do Claude", "Guarda a conversa em tempo real para continuar em outra conta",
             prefs.getBoolean("handoff_auto", true)
@@ -797,9 +1088,14 @@ class MainActivity : AppCompatActivity() {
                     this, packageName + ".fileprovider", zip
                 )
                 runOnUiThread {
-                    pendingClaudeFile = arrayOf(uri)
+                    val t = tabs.getOrNull(cur)
+                    if (t == null) { say("Nenhuma aba aberta", true); return@runOnUiThread }
                     say("Anexando ${zip.name} no Claude…")
-                    triggerClaudeAttach()
+                    // mesmo caminho do Script: campo de arquivo → arrastar → menu do +, e confere se o anexo apareceu
+                    attachZip(t, zip, uri) { ok ->
+                        if (ok) say("${zip.name} anexado ✓")
+                        else say("Não consegui anexar sozinho. Toque no + e escolha ${zip.name} em Downloads", true)
+                    }
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -915,9 +1211,9 @@ class MainActivity : AppCompatActivity() {
         if (key.isNotEmpty() && key == t.limitSrc) return t.until > now
         val at = LimitTime.parse(key, now)
         return when (at) {
-            LimitTime.UNKNOWN -> { if (limitLearned.add(t.id)) Est.onLimit(this, t.id, 0L); true }
+            LimitTime.UNKNOWN -> { limitLearned.add(t.id); true }
             LimitTime.PASSED -> { t.limitSrc = key; t.until = 0L; save(); tickNow(); false }
-            else -> { t.limitSrc = key; t.until = at; save(); tickNow(); Est.onLimit(this, t.id, at); true }
+            else -> { t.limitSrc = key; t.until = at; save(); tickNow(); true }
         }
     }
 
@@ -942,9 +1238,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Escolhe para qual aba (conta) levar o projeto. */
     private fun chooseTarget(from: Tab) {
-        val others = tabs.filter { it.id != from.id }
+        val others = tabs.filter { it.id != from.id && !it.parked }
         if (others.isEmpty()) {
-            say("Só existe uma aba. Toque em + para adicionar outra conta.", true)
+            say("Não há outra conta ativa. Toque em + para adicionar ou destrave uma guardada.", true)
             return
         }
         if (!Handoff.hasChat(this, from.id) && Projects.current(this) == null) {
@@ -1107,40 +1403,7 @@ class MainActivity : AppCompatActivity() {
         scr.ui.showResults()
     }
 
-    // ───────────── Uso das contas (0–100%) ─────────────
-
-    internal val usageMon: UsageMonitor by lazy { UsageMonitor(this) }
     internal val autoFix: AutoFix by lazy { AutoFix(this) }
-
-    private fun usageSub(): String {
-        val parts = tabs.mapNotNull { t ->
-            val i = Usage.map[t.id]
-            if (t.until > System.currentTimeMillis()) "${t.name} 100%"
-            else if (i != null && i.err.isEmpty() && i.s >= 0) "${t.name} ${i.s}%"
-            else if (Est.known(t.id)) "${t.name} ~${Est.percent(this, t.id)}%"
-            else null
-        }
-        return if (parts.isEmpty()) "Veja quanto cada conta já usou, ao vivo" else parts.joinToString(" · ")
-    }
-
-    /** WebView escondida com o mesmo login da aba, só para ler a página de uso. */
-    internal fun scrProbe(t: Tab): WebView {
-        val w = WebView(this)
-        if (profilesOk) { try { WebViewCompat.setProfile(w, "p_" + t.id) } catch (e: Exception) { } }
-        val s = w.settings
-        s.javaScriptEnabled = true
-        s.domStorageEnabled = true
-        s.allowFileAccess = false
-        s.userAgentString = s.userAgentString.replace("; wv", "").replace(Regex("Version/\\d+\\.\\d+ "), "")
-        CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
-        w.alpha = 0f
-        findViewById<ViewGroup>(android.R.id.content).addView(w, FrameLayout.LayoutParams(1, 1))
-        return w
-    }
-
-    internal fun scrProbeDone(w: WebView) {
-        try { (w.parent as? ViewGroup)?.removeView(w); w.destroy() } catch (_: Exception) { }
-    }
 
     // ───────────── Colar texto grande → arquivo → anexo no Claude ─────────────
 
@@ -1959,7 +2222,7 @@ return 'none';})();"""
     }
 
     private fun onTabFreed(t: Tab) {
-        say("\"${t.name}\" liberada ✓", true)
+        if (!t.parked) say("\"${t.name}\" liberada ✓", true)
         // limite detectado pelo aviso da página: recarrega para o aviso velho sumir
         if (t.limitSrc.isNotEmpty() && t.limitSrc != CLEARED) {
             t.limitSrc = ""
@@ -2017,55 +2280,61 @@ return 'none';})();"""
         }, c.get(java.util.Calendar.HOUR_OF_DAY), c.get(java.util.Calendar.MINUTE), true).show()
     }
 
+    private val C_FREE = Color.parseColor("#4ADE80")
+    private val C_COOL = Color.parseColor("#F2A65A")
+    private val C_PARK = Color.parseColor("#8B92A1")
+
+    /** Tempo curto para o chip da aba: "1h25" ou "12:30". */
+    private fun fmtShort(ms: Long): String {
+        val m = ms / 60_000L
+        return if (m >= 60) "${m / 60}h${(m % 60).toString().padStart(2, '0')}"
+        else String.format(java.util.Locale.US, "%02d:%02d", m, (ms / 1000) % 60)
+    }
+
+    /** Faixa de cima: só as contas ativas, com uma bolinha de estado (verde = liberada, laranja = em recarga). */
     inner class TabAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         inner class VH(val v: View) : RecyclerView.ViewHolder(v) {
             val av: TextView = v.findViewById(R.id.tabAvatar)
             val name: TextView = v.findViewById(R.id.tabName)
             val st: TextView = v.findViewById(R.id.tabStatus)
-            val ret: TextView = v.findViewById(R.id.tabReturn)
+            val dot: View = v.findViewById(R.id.tabDot)
+            private var dotColor = 0
             fun bindStatus(t: Tab) {
-                st.visibility = View.VISIBLE
                 val left = t.until - System.currentTimeMillis()
+                val c: Int
                 if (t.until <= 0L || left <= 0L) {
-                    st.text = "Liberado" + Usage.chip(t.id); st.setTextColor(Color.parseColor("#4ADE80"))
-                    ret.visibility = View.GONE
+                    st.text = "Liberada"
+                    c = C_FREE
                 } else {
-                    st.text = fmt(left); st.setTextColor(Color.parseColor("#E0A58F"))
-                    ret.text = returnLabel(t.until)
-                    ret.visibility = View.VISIBLE
+                    st.text = "⏳ " + fmtShort(left)
+                    c = C_COOL
+                }
+                st.setTextColor(c)
+                if (c != dotColor) {
+                    dotColor = c
+                    dot.background = Ui.shape(this@MainActivity, c, 0, Ui.color(this@MainActivity, R.color.surface), 2, oval = true)
                 }
             }
         }
-        inner class HeadVH(val box: LinearLayout, val label: TextView) : RecyclerView.ViewHolder(box)
+        inner class DivVH(v: View) : RecyclerView.ViewHolder(v)
 
-        override fun getItemViewType(position: Int) = if (rows.getOrNull(position) is Row.Head) 1 else 0
+        override fun getItemViewType(position: Int) = if (rows.getOrNull(position) is Row.Divider) 1 else 0
         override fun getItemCount() = rows.size
 
         override fun onCreateViewHolder(p: ViewGroup, type: Int): RecyclerView.ViewHolder {
             if (type == 1) {
-                val box = LinearLayout(p.context)
-                box.gravity = android.view.Gravity.CENTER_VERTICAL
-                box.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(56)).apply { marginEnd = dp(8) }
-                val tv = TextView(p.context)
-                tv.textSize = 10.5f
-                tv.letterSpacing = 0.06f
-                tv.setTypeface(tv.typeface, android.graphics.Typeface.BOLD)
-                tv.setPadding(dp(10), dp(5), dp(10), dp(5))
-                box.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                return HeadVH(box, tv)
+                val v = View(p.context)
+                v.setBackgroundColor(Ui.color(p.context, R.color.outline))
+                v.layoutParams = RecyclerView.LayoutParams(dp(1), dp(28)).apply {
+                    topMargin = dp(10); marginStart = dp(4); marginEnd = dp(10)
+                }
+                return DivVH(v)
             }
             return VH(layoutInflater.inflate(R.layout.item_conta, p, false))
         }
 
         override fun onBindViewHolder(h: RecyclerView.ViewHolder, i: Int) {
             val row = rows.getOrNull(i) ?: return
-            if (h is HeadVH && row is Row.Head) {
-                val color = Color.parseColor(if (row.free) "#4ADE80" else "#E0A58F")
-                h.label.text = (if (row.free) "LIBERADAS" else "EM RECARGA") + " · " + row.count
-                h.label.setTextColor(color)
-                h.label.background = Ui.shape(this@MainActivity, (0x22 shl 24) or (color and 0xFFFFFF), 12)
-                return
-            }
             if (h !is VH || row !is Row.Item) return
             val t = row.tab
             h.name.text = t.name
@@ -2084,27 +2353,28 @@ return 'none';})();"""
         }
     }
 
-    // ───────────── Abas: liberadas × em recarga ─────────────
+    // ───────────── Abas: liberadas × em recarga × guardadas ─────────────
 
     private sealed class Row {
-        class Head(val free: Boolean, val count: Int) : Row()
         class Item(val tab: Tab) : Row()
+        object Divider : Row()
     }
     private var rows: List<Row> = emptyList()
     private var rowsSig = ""
     private val coolingIds = HashSet<String>()
 
-    private fun sigNow(now: Long) = tabs.joinToString("|") { it.id + (if (it.until > now) "c" else "f") }
+    private fun sigNow(now: Long) = tabs.joinToString("|") {
+        it.id + (if (it.parked) "p" else if (it.until > now) "c" else "f")
+    }
 
-    /** Liberadas primeiro (na ordem em que você criou); em recarga depois, de quem volta antes para quem volta depois. */
+    /** Faixa: liberadas primeiro (na ordem em que você criou), uma linha fina, depois as em recarga (quem volta antes vem antes). Guardadas ficam só na tela "Contas". */
     private fun buildRows(now: Long): List<Row> {
-        val free = tabs.filter { it.until <= now }
-        val cool = tabs.filter { it.until > now }.sortedBy { it.until }
+        val active = tabs.filter { !it.parked }
+        val free = active.filter { it.until <= now }
+        val cool = active.filter { it.until > now }.sortedBy { it.until }
         val out = ArrayList<Row>()
-        val split = free.isNotEmpty() && cool.isNotEmpty()
-        if (split) out.add(Row.Head(true, free.size))
         free.forEach { out.add(Row.Item(it)) }
-        if (split) out.add(Row.Head(false, cool.size))
+        if (free.isNotEmpty() && cool.isNotEmpty()) out.add(Row.Divider)
         cool.forEach { out.add(Row.Item(it)) }
         return out
     }

@@ -47,8 +47,6 @@ class ScriptRunner(private val a: MainActivity) {
     private var dlStart = 0L
     private var noneCount = 0
     private var lastSnapAt = 0L
-    private var lastUsageAt = 0L
-    private val warned = HashSet<String>()
     private var limitBusy = false
     private var wake: PowerManager.WakeLock? = null
 
@@ -427,11 +425,7 @@ class ScriptRunner(private val a: MainActivity) {
         taskBegan = true
         sentAt = System.currentTimeMillis()
         Script.log(a, "Mensagem enviada ao Claude (tarefa ${Script.idx + 1})")
-        try {
-            val bytes = lastAttachBytes
-            lastAttachBytes = 0L
-            if (bytes > 0L) Est.addAttachment(a, Script.chatTabId, bytes)
-        } catch (_: Exception) { }
+        lastAttachBytes = 0L
         enterWait(true)
     }
 
@@ -479,17 +473,6 @@ class ScriptRunner(private val a: MainActivity) {
         val w = tab?.let { a.scrWeb(it) }
         if (tab == null || w == null) { poll(g); return }
         val now = System.currentTimeMillis()
-        // uso das contas: relê a cada 4 min e avisa no relatório quando passa de 90%
-        if (now - lastUsageAt > 240_000L) {
-            lastUsageAt = now
-            a.usageMon.refreshAll {
-                a.scrTabs().forEach { t ->
-                    val i = Usage.map[t.id]
-                    if (i != null && i.s >= 90 && warned.add(t.id)) Script.log(a, "Conta \"${t.name}\" em ${i.s}% da sessão")
-                    if (i != null && i.s in 0..60) warned.remove(t.id)
-                }
-            }
-        }
         // limite?
         if (now - lastSnapAt > 20_000L) {
             lastSnapAt = now
@@ -757,7 +740,7 @@ class ScriptRunner(private val a: MainActivity) {
         val from = a.scrTab(Script.chatTabId)
         if (from == null) { failPause("A aba do script não existe mais"); return }
         val now = System.currentTimeMillis()
-        val tabs = a.scrTabs()
+        val tabs = a.scrTabs().filter { !it.parked || it.id == from.id }
         val free = tabs.filter { it.id != from.id && it.until <= now }.minByOrNull { it.until }
         if (free != null) { doHandoff(from, free, g); return }
         if (from.until <= now) {
