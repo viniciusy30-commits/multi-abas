@@ -1608,7 +1608,7 @@ window.addEventListener('click',function(e){
             }
         }
         sess.onEnd = { sm -> runOnUiThread { finish(sm) } }
-        handler.postDelayed({ finish("") }, 150_000)
+        handler.postDelayed({ finish("") }, 420_000)
         w.evaluateJavascript(Handoff.FULL_JS.replace("__TOKEN__", tok)) { r ->
             if (r?.contains("nobridge") == true) finish("")
         }
@@ -1636,7 +1636,13 @@ window.addEventListener('click',function(e){
                 val files = sum?.optInt("files") ?: 0
                 val chars = sum?.optInt("chars") ?: 0
                 val codes = sum?.optInt("code") ?: 0
+                val made = sum?.optInt("created") ?: 0
+                val sand = sum?.optInt("sandbox") ?: 0
+                val listed = sum?.optInt("listed") ?: 0
                 ui.set("full", "✓", "Chat completo: $imgs imagem(ns), $files arquivo(s), $codes bloco(s) de código, ${chars / 1000} mil caracteres")
+                ui.set("srv", if (made + sand > 0) "✓" else "–", "Do servidor do Claude: $made arquivo(s) recriado(s), $sand de $listed arquivo(s) baixado(s)")
+                val apiErr = sum?.optString("apiErr") ?: ""
+                if (apiErr.isNotBlank()) ui.set("srverr", "✗", "Leitura pelo servidor falhou: $apiErr")
                 val err = sum?.optString("err") ?: ""
                 if (err.isNotBlank()) ui.set("fullerr", "✗", "Parte do chat falhou: $err")
             }

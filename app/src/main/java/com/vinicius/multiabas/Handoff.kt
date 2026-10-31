@@ -192,6 +192,17 @@ async function grab(src,folder,base,fname){
   return folder+'/'+name;
  }catch(e){return null;}
 }
+async function grabApi(src,folder,fname){
+ try{
+  var r=await fetch(src,{credentials:'include'});if(!r.ok)return null;
+  var blob=await r.blob();
+  if(blob.size<1||blob.size>25*1024*1024||total+blob.size>LIMIT)return null;
+  var du=await readAs(blob);if(!du)return null;
+  total+=blob.size;
+  A.hfBin(tok,folder+'/'+fname,blob.type||'',du);
+  return folder+'/'+fname;
+ }catch(e){return null;}
+}
 (async function(){
  var sum={msgs:0,imgs:0,files:0,chars:0,err:''};
  try{
@@ -249,6 +260,83 @@ async function grab(src,folder,base,fname){
    A.hfProgress(tok,'Baixando arquivo '+(q+1)+' de '+dl.length+'…');
    var loc2=await grab(D.h,'arquivos','f'+q,fn);if(loc2)sum.files++;
   }
+  try{
+   var cm=/\/chat\/([0-9a-fA-F-]{36})/.exec(location.pathname),cid=cm?cm[1]:'';
+   if(cid){
+    A.hfProgress(tok,'Lendo a conversa inteira pelo servidor…');
+    var orgs=[],om=/(?:^|;\s*)lastActiveOrg=([0-9a-fA-F-]{36})/.exec(document.cookie);
+    if(om)orgs.push(om[1]);
+    try{var ro=await fetch('/api/organizations',{credentials:'include'});var oj=await ro.json();
+     (oj||[]).forEach(function(o){if(o&&o.uuid&&orgs.indexOf(o.uuid)<0)orgs.push(o.uuid);});}catch(e){}
+    var cj=null,org='';
+    for(var oi=0;oi<orgs.length&&!cj;oi++){
+     try{
+      var rc=await fetch('/api/organizations/'+orgs[oi]+'/chat_conversations/'+cid+'?tree=True&rendering_mode=messages&render_all_tools=true',{credentials:'include'});
+      if(rc.ok){var rawj=await rc.text();cj=JSON.parse(rawj);org=orgs[oi];A.hfText(tok,'conversa-bruta.json',rawj);}
+     }catch(e){}
+    }
+    if(!cj){sum.apiErr='não consegui ler a conversa pelo servidor';}
+    else{
+     var made={},arts={},cmds=[],skipped=[],present=[],attach=[];
+     var emap={'text/html':'html','application/vnd.ant.react':'jsx','image/svg+xml':'svg','text/markdown':'md','application/vnd.ant.mermaid':'mermaid'};
+     (cj.chat_messages||[]).forEach(function(msg){
+      (msg.files_v2||msg.files||[]).forEach(function(f){attach.push(f);});
+      (msg.content||[]).forEach(function(b){
+       if(!b||b.type!=='tool_use'||!b.input)return;
+       var i=b.input,nm=b.name;
+       if(nm==='create_file'&&i.path){made[i.path]=String(i.file_text||'');}
+       else if(nm==='str_replace'&&i.path&&i.old_str!==undefined){
+        if(made[i.path]!==undefined&&made[i.path].indexOf(i.old_str)>=0){var ns=String(i.new_str||'');made[i.path]=made[i.path].replace(i.old_str,function(){return ns;});}
+        else skipped.push(i.path+' (edição sobre arquivo que não foi criado pelo create_file)');
+       }
+       else if(nm==='bash_tool'&&i.command){cmds.push('# '+(i.description||'')+'\n'+i.command);}
+       else if(nm==='present_files'&&i.filepaths){i.filepaths.forEach(function(x){present.push(x);});}
+       else if(nm==='artifacts'&&i.id){
+        var a=arts[i.id]||(arts[i.id]={title:i.title||i.id,ext:emap[i.type]||i.language||'txt',content:''});
+        if(i.title)a.title=i.title;
+        if((i.command==='create'||i.command==='rewrite')&&i.content!==undefined)a.content=String(i.content);
+        else if(i.command==='update'&&i.old_str!==undefined&&a.content.indexOf(i.old_str)>=0){var n2=String(i.new_str||'');a.content=a.content.replace(i.old_str,function(){return n2;});}
+       }
+      });
+     });
+     var mk=Object.keys(made);
+     for(var mi=0;mi<mk.length;mi++){A.hfText(tok,'arquivos-criados/'+mk[mi].replace(/^\/+/,''),made[mk[mi]]);sum.created=(sum.created||0)+1;}
+     var ak=Object.keys(arts);
+     for(var ai=0;ai<ak.length;ai++){if(arts[ak[ai]].content){A.hfText(tok,'artifacts/'+(arts[ak[ai]].title||ak[ai]).replace(/[^\w.-]+/g,'_')+'.'+arts[ak[ai]].ext,arts[ak[ai]].content);sum.arts=(sum.arts||0)+1;}}
+     if(cmds.length)A.hfText(tok,'comandos-bash.txt',cmds.join('\n\n----------\n\n'));
+     if(skipped.length)A.hfText(tok,'edicoes-nao-aplicadas.txt',skipped.join('\n'));
+     A.hfText(tok,'anexos-do-chat.json',JSON.stringify(attach));
+     for(var fi=0;fi<attach.length;fi++){
+      var af=attach[fi],au=af.preview_url||af.thumbnail_url||'';
+      if(au&&(af.file_kind==='image'||/image/i.test(af.file_kind||''))){
+       A.hfProgress(tok,'Baixando imagem enviada '+(fi+1)+' de '+attach.length+'…');
+       var sv=await grabApi(au,'imagens-anexadas',(af.file_uuid||('x'+fi)).slice(0,8)+'_'+(af.file_name||'imagem.png'));
+       if(sv)sum.attach=(sum.attach||0)+1;
+      }
+     }
+     var base='/api/organizations/'+org+'/conversations/'+cid+'/wiggle/',paths=present.slice();
+     var lq=['','?prefix=%2Fmnt%2Fuser-data%2Foutputs','?path=%2Fmnt%2Fuser-data%2Foutputs'];
+     for(var li=0;li<lq.length;li++){
+      try{
+       var lr=await fetch(base+'list-files'+lq[li],{credentials:'include'});
+       if(!lr.ok)continue;
+       var lj=await lr.json();
+       var arr=Array.isArray(lj)?lj:(lj.files||lj.paths||lj.items||[]);
+       arr.forEach(function(x){var pp=typeof x==='string'?x:(x&&(x.path||x.name||x.file_path));if(pp&&typeof pp==='string'&&paths.indexOf(pp)<0)paths.push(pp);});
+       if(paths.length)break;
+      }catch(e){}
+     }
+     paths=paths.slice(0,300);
+     for(var pi=0;pi<paths.length;pi++){
+      A.hfProgress(tok,'Baixando arquivo do Claude '+(pi+1)+' de '+paths.length+'…');
+      var pth=paths[pi];
+      var gp=await grabApi(base+'download-file?path='+encodeURIComponent(pth),'arquivos-do-chat',pth.replace(/^\/+/,''));
+      if(gp)sum.sandbox=(sum.sandbox||0)+1;
+     }
+     sum.listed=paths.length;
+    }
+   }
+  }catch(e){sum.apiErr=String(e&&e.message||e);}
   var full=parts.join('\n\n');
   sum.msgs=parts.length;sum.chars=full.length;
   A.hfText(tok,'conversa-completa.txt',full);
@@ -270,7 +358,8 @@ return 'started';
         "do projeto), nunca código para copiar e colar. Se houver um trabalho-incompleto.txt, ele mostra " +
         "o que o Claude anterior estava fazendo quando o limite acabou: termine a partir dali. A pasta " +
         "chat-completo/ tem a conversa inteira com todos os blocos abertos, as imagens, os blocos de código e os links; " +
-        "arquivos-do-claude/ tem cópia de tudo (ZIPs, imagens, arquivos) que o Claude anterior entregou."
+        "arquivos-do-claude/ tem cópia de tudo (ZIPs, imagens, arquivos) que o Claude anterior entregou; " +
+        "dentro de chat-completo/, arquivos-criados/ e arquivos-do-chat/ têm os arquivos que ele fez mas não chegou a mandar em ZIP: use-os como base e entregue tudo junto em ZIP."
 
     private fun slug(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
@@ -414,7 +503,7 @@ return 'started';
                 }
                 if (!progress.isNullOrBlank()) appendLine("- `PROGRESSO-DO-SCRIPT.md` — **leia primeiro**: quais tarefas do script já estão CONCLUÍDAS (não refazer), quais arquivos cada uma mudou e em que ponto a tarefa atual parou.")
                 appendLine("- `arquivos-do-claude/` — cópia de TUDO que o Claude entregou nesta conta (ZIPs, imagens, PDFs...), mesmo o que nunca foi para o GitHub. Se algo daqui não estiver em `codigo/`, ainda não foi aplicado.")
-                if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/`, `codigo-do-chat/` (cada bloco de código do chat em arquivo separado) e `links.txt`.")
+                if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/`, `codigo-do-chat/` (cada bloco de código do chat em arquivo separado), `links.txt`, e o que foi lido direto do servidor do Claude: `arquivos-criados/` (todo arquivo que o Claude anterior criou, já com as edições aplicadas, mesmo os que nunca foram baixados), `arquivos-do-chat/` (os arquivos prontos da conta anterior), `imagens-anexadas/`, `artifacts/`, `comandos-bash.txt` e `conversa-bruta.json`.")
                 if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
                 if (!ov.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${ov.size} arquivo(s)).")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
