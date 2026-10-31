@@ -66,6 +66,19 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:!
 
     private fun now() = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
 
+    /** Pasta onde fica uma cópia de TUDO que o Claude entregou (ZIPs, imagens, PDFs...), por projeto. */
+    private fun archiveDir(ctx: Context, projectId: String) =
+        File(dir(ctx), "entregues_${projectId.ifBlank { "geral" }}").apply { mkdirs() }
+
+    /** Guarda uma cópia do arquivo que o Claude acabou de entregar, para ir no pacote de continuação. */
+    fun archive(ctx: Context, projectId: String, name: String, bytes: ByteArray) {
+        try {
+            val clean = name.replace(Regex("[^\\w.\\-]+"), "_").trim('.').ifEmpty { "arquivo" }
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+            File(archiveDir(ctx, projectId), "$stamp-$clean").writeBytes(bytes)
+        } catch (_: Exception) { }
+    }
+
     /** Guarda a conversa da aba. Só reescreve se mudou e se veio conteúdo de verdade. */
     fun save(ctx: Context, tabId: String, s: Snap) {
         if (s.text.length < 40) return
@@ -162,7 +175,7 @@ function extOf(m){m=(m||'').toLowerCase();
  if(m.indexOf('webp')>=0)return 'webp';if(m.indexOf('gif')>=0)return 'gif';if(m.indexOf('svg')>=0)return 'svg';
  if(m.indexOf('pdf')>=0)return 'pdf';if(m.indexOf('zip')>=0)return 'zip';if(m.indexOf('json')>=0)return 'json';
  if(m.indexOf('text')>=0)return 'txt';return 'bin';}
-var total=0,LIMIT=20*1024*1024;
+var total=0,LIMIT=250*1024*1024;
 function readAs(blob){return new Promise(function(res){var fr=new FileReader();fr.onloadend=function(){res(fr.result);};fr.onerror=function(){res(null);};fr.readAsDataURL(blob);});}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
 async function grab(src,folder,base,fname){
@@ -171,7 +184,7 @@ async function grab(src,folder,base,fname){
   if(src.indexOf('data:')===0){var r0=await fetch(src);blob=await r0.blob();}
   else{var r=await fetch(src,{credentials:'include'});if(!r.ok)return null;blob=await r.blob();}
   if((blob.type||'').indexOf('text/html')===0)return null;
-  if(blob.size<200||blob.size>12*1024*1024||total+blob.size>LIMIT)return null;
+  if(blob.size<200||blob.size>60*1024*1024||total+blob.size>LIMIT)return null;
   var name=fname||(base+'.'+extOf(blob.type));
   var du=await readAs(blob);if(!du)return null;
   total+=blob.size;
@@ -208,12 +221,28 @@ async function grab(src,folder,base,fname){
     var loc=await grab(src,'imagens','img_'+(sum.imgs+1));
     if(loc){sum.imgs++;ci[j].setAttribute('src',loc);ci[j].removeAttribute('srcset');}
    }
+   if(!isU){
+    n.querySelectorAll('pre').forEach(function(pr){
+     var ct=(pr.innerText||'').trim();if(ct.length<20)return;
+     var cd=pr.querySelector('code'),cl=((cd&&cd.className)||'')+' '+(pr.className||'');
+     var lm=/language-([\w+#-]+)/.exec(cl),lang=lm?lm[1].toLowerCase():'txt';
+     var map={kotlin:'kt',python:'py',javascript:'js',typescript:'ts',bash:'sh',shell:'sh',yaml:'yml',markdown:'md'};
+     sum.code=(sum.code||0)+1;
+     var fnm='codigo-do-chat/bloco_'+String(sum.code).padStart(3,'0')+'.'+(map[lang]||lang);
+     A.hfText(tok,fnm,ct);
+    });
+    n.querySelectorAll('svg').forEach(function(sv){
+     var bb=sv.getBoundingClientRect();if(bb.width<80||bb.height<80)return;
+     sum.svgs=(sum.svgs||0)+1;
+     A.hfText(tok,'imagens/svg_'+sum.svgs+'.svg',new XMLSerializer().serializeToString(sv));
+    });
+   }
    n.querySelectorAll('a[href]').forEach(function(a){var h=a.href;if(h&&h.indexOf('javascript')!==0)links.push({t:(a.innerText||'').trim().slice(0,80),h:h,d:a.getAttribute('download')||''});});
    html.push('<div class="'+(isU?'u':'c')+'"><b>'+(isU?'VOCÊ':'CLAUDE')+'</b>'+c.innerHTML+'</div>');
   }
   var seen={},lt=[];
   for(var k=0;k<links.length;k++){var L=links[k];if(seen[L.h])continue;seen[L.h]=1;lt.push((L.t||'(sem texto)')+' -> '+L.h);}
-  var dl=links.filter(function(L){return L.d||/\/(download|files?|attachments?)\b/i.test(L.h);}).slice(0,15);
+  var dl=links.filter(function(L){return L.d||/\/(download|files?|attachments?|artifacts?)\b|\.(zip|pdf|docx?|xlsx?|pptx?|csv|json|txt|md|apk|png|jpe?g|webp|gif|svg|py|kt|js|html?|xml)(\?|$)/i.test(L.h);}).slice(0,200);
   for(var q=0;q<dl.length;q++){
    var D=dl[q];
    var fn=(D.d||D.h.split('?')[0].split('/').pop()||('arquivo_'+(q+1))).replace(/[^\w.\-]+/g,'_');
@@ -240,7 +269,8 @@ return 'started';
         "entregue as mudanças como ZIP pronto para baixar (os arquivos alterados/novos na estrutura " +
         "do projeto), nunca código para copiar e colar. Se houver um trabalho-incompleto.txt, ele mostra " +
         "o que o Claude anterior estava fazendo quando o limite acabou: termine a partir dali. A pasta " +
-        "chat-completo/ tem a conversa inteira com todos os blocos abertos, as imagens do chat e os links."
+        "chat-completo/ tem a conversa inteira com todos os blocos abertos, as imagens, os blocos de código e os links; " +
+        "arquivos-do-claude/ tem cópia de tudo (ZIPs, imagens, arquivos) que o Claude anterior entregou."
 
     private fun slug(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
@@ -248,8 +278,8 @@ return 'started';
 
     private fun skip(path: String): Boolean {
         val p = path.lowercase()
-        return p.startsWith(".git/") || p.endsWith(".keystore") || p.endsWith(".jks") ||
-            p.endsWith(".apk") || p.startsWith("_incoming/")
+        // só ficam de fora o .git e as chaves de assinatura (segredo); ZIPs, APKs e o resto entram
+        return p.startsWith(".git/") || p.endsWith(".keystore") || p.endsWith(".jks")
     }
 
     private fun put(z: ZipOutputStream, name: String, text: String) {
@@ -342,6 +372,17 @@ return 'started';
                 if (live.isNotBlank()) put(z, "PLANO-VIVO.md", live)
                 if (diary.isNotBlank()) put(z, "diario-da-missao.txt", diary.takeLast(60_000))
             }
+            if (project != null) {
+                val files = archiveDir(ctx, project.id).listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
+                if (files.isNotEmpty()) {
+                    onStatus("Juntando ${files.size} arquivo(s) entregue(s) pelo Claude…")
+                    files.forEach { f ->
+                        z.putNextEntry(ZipEntry("arquivos-do-claude/${f.name}"))
+                        f.inputStream().use { it.copyTo(z) }
+                        z.closeEntry()
+                    }
+                }
+            }
             onStatus("Salvando a conversa…")
             put(z, "conversa-anterior.txt", transcript.ifBlank { "(nenhuma conversa capturada nesta aba)" })
             put(z, "entregas.txt", log.ifBlank { "(nenhuma entrega registrada)" })
@@ -372,7 +413,8 @@ return 'started';
                     appendLine("- `diario-da-missao.txt` — linha do tempo: contas usadas, limites, ZIPs aceitos e recusados.")
                 }
                 if (!progress.isNullOrBlank()) appendLine("- `PROGRESSO-DO-SCRIPT.md` — **leia primeiro**: quais tarefas do script já estão CONCLUÍDAS (não refazer), quais arquivos cada uma mudou e em que ponto a tarefa atual parou.")
-                if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/` e `links.txt`.")
+                appendLine("- `arquivos-do-claude/` — cópia de TUDO que o Claude entregou nesta conta (ZIPs, imagens, PDFs...), mesmo o que nunca foi para o GitHub. Se algo daqui não estiver em `codigo/`, ainda não foi aplicado.")
+                if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/`, `codigo-do-chat/` (cada bloco de código do chat em arquivo separado) e `links.txt`.")
                 if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
                 if (!ov.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${ov.size} arquivo(s)).")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")

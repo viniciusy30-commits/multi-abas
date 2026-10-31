@@ -323,6 +323,10 @@ class MainActivity : AppCompatActivity() {
                     progress.visibility = if (p < 100) View.VISIBLE else View.GONE
                 }
             }
+            override fun onPermissionRequest(request: PermissionRequest) { handleWebPermission(request) }
+            override fun onPermissionRequestCanceled(request: PermissionRequest) {
+                if (pendingWebPerm === request) pendingWebPerm = null
+            }
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                 fileCb?.onReceiveValue(null)
                 fileCb = cb
@@ -352,6 +356,7 @@ class MainActivity : AppCompatActivity() {
                 val fin = if (clean.isEmpty()) "claude_" + System.currentTimeMillis() + "." + ext
                     else if (!clean.contains('.')) clean + "." + ext else clean
                 saveBytes(bytes, fin, mime)
+                Handoff.archive(this@MainActivity, Projects.current(this@MainActivity)?.id ?: "", fin, bytes)
                 runOnUiThread {
                     say("Salvo em Downloads: $fin", true)
                     maybeDeliverZip(fin, bytes)
@@ -445,6 +450,7 @@ class MainActivity : AppCompatActivity() {
                         if (c.responseCode !in 200..299) throw Exception("HTTP " + c.responseCode)
                         val bytes = c.inputStream.use { it.readBytes() }
                         saveBytes(bytes, zipName, "application/zip")
+                        Handoff.archive(this, Projects.current(this)?.id ?: "", zipName, bytes)
                         runOnUiThread {
                             say("Salvo em Downloads: $zipName", true)
                             maybeDeliverZip(zipName, bytes)
@@ -990,6 +996,41 @@ window.addEventListener('click',function(e){
         }.start()
     }
 
+    // ── microfone (e câmera) pedidos pelas páginas, ex.: ditado por voz do Claude ──
+    private var pendingWebPerm: PermissionRequest? = null
+
+    private fun handleWebPermission(req: PermissionRequest) {
+        runOnUiThread {
+            val host = req.origin?.host ?: ""
+            val okSite = req.origin?.scheme == "https" && (host == "claude.ai" || host.endsWith(".claude.ai"))
+            val wantsMic = req.resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+            if (!okSite || !wantsMic) { req.deny(); return@runOnUiThread }
+            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                req.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            } else {
+                pendingWebPerm?.deny()
+                pendingWebPerm = req
+                requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), 92)
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 92) {
+            val req = pendingWebPerm
+            pendingWebPerm = null
+            if (req != null) {
+                if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                    req.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                else {
+                    req.deny()
+                    say("Sem permissão do microfone. Libere em Configurações do Android > Apps > Multi Abas > Permissões.", true)
+                }
+            }
+        }
+    }
+
     private fun maybeRequestNotifPermission() {
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -1077,7 +1118,12 @@ window.addEventListener('click',function(e){
         Thread {
             try {
                 val branch = p.branch.ifBlank { "main" }
-                val zip = GitHubDelivery.downloadRepoZip(this, token, p, branch)
+                var zip: java.io.File? = null
+                for (i in 1..3) {
+                    zip = GitHubDelivery.downloadRepoZip(this, token, p, branch)
+                    if (zip != null && zip.exists()) break
+                    if (i < 3) { runOnUiThread { say("Falhou ao baixar, tentando de novo ($i/3)…") }; Thread.sleep(1500) }
+                }
                 if (zip == null || !zip.exists()) {
                     runOnUiThread {
                         say("Não foi possível baixar o ZIP de ${p.fullRepo()}@$branch", true)
@@ -1090,11 +1136,28 @@ window.addEventListener('click',function(e){
                 runOnUiThread {
                     val t = tabs.getOrNull(cur)
                     if (t == null) { say("Nenhuma aba aberta", true); return@runOnUiThread }
-                    say("Anexando ${zip.name} no Claude…")
-                    // mesmo caminho do Script: campo de arquivo → arrastar → menu do +, e confere se o anexo apareceu
-                    attachZip(t, zip, uri) { ok ->
-                        if (ok) say("${zip.name} anexado ✓")
-                        else say("Não consegui anexar sozinho. Toque no + e escolha ${zip.name} em Downloads", true)
+                    val w = webs[t.id]
+                    if (w == null || !(w.url ?: "").contains("claude.ai")) {
+                        say("Abra uma aba do Claude para anexar o main", true)
+                        return@runOnUiThread
+                    }
+                    val zf: java.io.File = zip
+                    say("Anexando ${zf.name} no Claude…")
+                    // espera a caixa de mensagem existir (página ainda carregando era a causa de falhar de primeira)
+                    waitComposer(w, 20) { ready ->
+                        if (!ready) {
+                            say("A caixa de mensagem do Claude não apareceu. Abra um chat e toque de novo.", true)
+                            return@waitComposer
+                        }
+                        // mesmo caminho do Script: campo de arquivo → arrastar → menu do +, e confere se o anexo apareceu
+                        fun go(n: Int) {
+                            attachZip(t, zf, uri) { ok ->
+                                if (ok) say("${zf.name} anexado ✓")
+                                else if (n < 3) { say("Tentando anexar de novo ($n/3)…"); go(n + 1) }
+                                else say("Não consegui anexar sozinho. Toque no + e escolha ${zf.name} em Downloads", true)
+                            }
+                        }
+                        go(1)
                     }
                 }
             } catch (e: Exception) {
@@ -1572,7 +1635,8 @@ window.addEventListener('click',function(e){
                 val imgs = sum?.optInt("imgs") ?: 0
                 val files = sum?.optInt("files") ?: 0
                 val chars = sum?.optInt("chars") ?: 0
-                ui.set("full", "✓", "Chat completo: $imgs imagem(ns), $files arquivo(s), ${chars / 1000} mil caracteres")
+                val codes = sum?.optInt("code") ?: 0
+                ui.set("full", "✓", "Chat completo: $imgs imagem(ns), $files arquivo(s), $codes bloco(s) de código, ${chars / 1000} mil caracteres")
                 val err = sum?.optString("err") ?: ""
                 if (err.isNotBlank()) ui.set("fullerr", "✗", "Parte do chat falhou: $err")
             }
@@ -1675,7 +1739,6 @@ window.addEventListener('click',function(e){
     private fun attLog(s: String) { if (Script.status == Script.RUNNING) Script.log(this, s) }
 
     private fun tryInject(w: WebView, name: String, mode: String, cb: (Boolean) -> Unit) {
-        w.evaluateJavascript(Handoff.INJECT_JS.replace("__MODE__", mode), null)
         // o Claude mostra o nome do anexo sem ".zip" e às vezes cortado: procura só o começo, sem a extensão
         val probe = name.substringBeforeLast('.').let { if (it.length > 20) it.substring(0, 20) else it }.ifBlank { name }
         fun look(n: Int) {
@@ -1685,7 +1748,12 @@ window.addEventListener('click',function(e){
                 else w.postDelayed({ look(n - 1) }, 1000)
             }
         }
-        w.postDelayed({ look(9) }, 2000)
+        w.evaluateJavascript(Handoff.INJECT_JS.replace("__MODE__", mode)) { r ->
+            val x = r ?: ""
+            // não achou o campo/caixa: passa logo para o próximo método em vez de esperar ~11s à toa
+            if (x.contains("noinput") || x.contains("noeditor") || x.contains("nodt") || x.contains("err")) cb(false)
+            else w.postDelayed({ look(9) }, 2000)
+        }
     }
 
     private val FIND_PLUS_JS = """(function(){
@@ -2125,6 +2193,10 @@ return 'none';})();"""
                 hook(v)
                 favProgress.progress = p
                 favProgress.visibility = if (p < 100) View.VISIBLE else View.GONE
+            }
+            override fun onPermissionRequest(request: PermissionRequest) { handleWebPermission(request) }
+            override fun onPermissionRequestCanceled(request: PermissionRequest) {
+                if (pendingWebPerm === request) pendingWebPerm = null
             }
             override fun onShowFileChooser(v: WebView, cb: ValueCallback<Array<Uri>>, p: FileChooserParams): Boolean {
                 fileCb?.onReceiveValue(null)
