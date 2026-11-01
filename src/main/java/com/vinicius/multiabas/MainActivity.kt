@@ -1246,7 +1246,7 @@ window.addEventListener('click',function(e){
                 var zip: java.io.File? = null
                 for (i in 1..3) {
                     zip = GitHubDelivery.downloadRepoZip(this, token, p, branch)
-                    if (zip != null && zip.exists()) break
+                    if (zip != null && zip.exists() && LeanZip.count(zip) > 0) break
                     if (i < 3) { runOnUiThread { say("Falhou ao baixar, tentando de novo ($i/3)…") }; Thread.sleep(1500) }
                 }
                 if (zip == null || !zip.exists()) {
@@ -1256,10 +1256,22 @@ window.addEventListener('click',function(e){
                     return@Thread
                 }
                 val zipF: java.io.File = zip
-                val parts: List<java.io.File>? =
-                    if (zipF.length() > ZipSplitter.THRESHOLD)
-                        ZipSplitter.split(this, Uri.fromFile(zipF), zipF.name).mapNotNull { u -> u.path?.let { java.io.File(it) } }.ifEmpty { null }
-                    else null
+                val nFiles = LeanZip.count(zipF)
+                val mb = zipF.length() / (1024 * 1024)
+                runOnUiThread { say("Main baixado: $mb MB, $nFiles arquivos") }
+                var sendFiles: List<java.io.File> = listOf(zipF)
+                var aviso: String? = null
+                if (zipF.length() > 29L * 1024 * 1024) {
+                    val parts = ZipSplitter.split(this, Uri.fromFile(zipF), zipF.name).mapNotNull { u -> u.path?.let { java.io.File(it) } }
+                    if (parts.isNotEmpty()) {
+                        sendFiles = parts
+                        aviso = "Passa de 29 MB: dividi em ${parts.size} partes e envio todas juntas."
+                    } else {
+                        aviso = "Não consegui dividir o main; vou tentar enviar inteiro."
+                    }
+                }
+                val sendFinal: List<java.io.File> = sendFiles
+                val avisoFinal: String? = aviso
                 runOnUiThread {
                     val t = tabs.getOrNull(cur)
                     if (t == null) { say("Nenhuma aba aberta", true); return@runOnUiThread }
@@ -1268,8 +1280,8 @@ window.addEventListener('click',function(e){
                         say("Abra uma aba do Claude para anexar o main", true)
                         return@runOnUiThread
                     }
-                    val files: List<java.io.File> = parts ?: listOf(zipF)
-                    if (parts != null) say("O main passa de 30 MB: dividi em ${parts.size} partes", true)
+                    val files: List<java.io.File> = sendFinal
+                    if (avisoFinal != null) say(avisoFinal, true)
                     say("Anexando ${files.first().name} no Claude…")
                     // espera a caixa de mensagem existir (página ainda carregando era a causa de falhar de primeira)
                     waitComposer(w, 20) { ready ->
@@ -1277,21 +1289,22 @@ window.addEventListener('click',function(e){
                             say("A caixa de mensagem do Claude não apareceu. Abra um chat e toque de novo.", true)
                             return@waitComposer
                         }
-                        // anexa um arquivo por vez; cada um tenta até 3 vezes
-                        fun attachAt(k: Int) {
-                            if (k >= files.size) return
-                            val f = files[k]
-                            val u = androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f)
-                            fun go(n: Int) {
-                                attachZip(t, f, u) { ok ->
-                                    if (ok) { say("${f.name} anexado ✓"); attachAt(k + 1) }
-                                    else if (n < 3) { say("Tentando anexar de novo ($n/3)…"); go(n + 1) }
-                                    else say("Não consegui anexar sozinho. Toque no + e escolha ${f.name} em Downloads", true)
+                        // entrega todas as partes de uma vez pelo seletor de arquivos (igual ao envio manual)
+                        val uris = files.map { f -> androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f) }
+                        attachWithRetries(t, uris, 0) { ok ->
+                            if (ok) say(if (files.size > 1) "${files.size} partes anexadas ✓" else "${files.first().name} anexado ✓")
+                            else {
+                                // plano B: injeta um por vez na página
+                                fun inj(k: Int) {
+                                    if (k >= files.size) { say("${files.size} arquivo(s) anexado(s) ✓"); return }
+                                    attachZip(t, files[k], uris[k]) { ok2 ->
+                                        if (ok2) inj(k + 1)
+                                        else say("Não consegui anexar ${files[k].name}. Toque no + e escolha em Downloads", true)
+                                    }
                                 }
+                                inj(0)
                             }
-                            go(1)
                         }
-                        attachAt(0)
                     }
                 }
             } catch (e: Exception) {
@@ -1942,10 +1955,14 @@ return 'none';})();"""
     }
 
     /** Tenta abrir o seletor de arquivos do Claude e entregar o ZIP; confere se o seletor foi usado. */
-    private fun attachWithRetries(to: Tab, uri: Uri, attempt: Int, result: (Boolean) -> Unit) {
+    private fun attachWithRetries(to: Tab, uri: Uri, attempt: Int, result: (Boolean) -> Unit) =
+        attachWithRetries(to, listOf(uri), attempt, result)
+
+    private fun attachWithRetries(to: Tab, uris: List<Uri>, attempt: Int, result: (Boolean) -> Unit) {
+        val uri = uris.first()
         val w = webs[to.id]
         if (w == null) { result(false); return }
-        pendingClaudeFile = arrayOf(uri)
+        pendingClaudeFile = uris.toTypedArray()
         if (attempt == 0) {
             w.evaluateJavascript("(function(){var i=document.querySelector('input[type=file]');if(i){i.click();return 'input';}return 'none';})();", null)
         } else {
@@ -1958,7 +1975,7 @@ return 'none';})();"""
         w.postDelayed({
             when {
                 pendingClaudeFile == null -> { attLog("Anexo: o seletor de arquivos recebeu o ZIP (tentativa $attempt)"); result(true) }
-                attempt < 3 -> attachWithRetries(to, uri, attempt + 1, result)
+                attempt < 3 -> attachWithRetries(to, uris, attempt + 1, result)
                 else -> { pendingClaudeFile = null; attLog("Anexo: não consegui por nenhum caminho; vou tentar de novo"); result(false) }
             }
         }, if (attempt == 0) 2000L else 3500L)
