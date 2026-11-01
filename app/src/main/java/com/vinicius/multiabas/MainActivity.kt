@@ -107,7 +107,16 @@ class MainActivity : AppCompatActivity() {
     }
     // Fallback: documentos / qualquer arquivo
     private val docPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        fileCb?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(r.resultCode, r.data))
+        val out = ArrayList<Uri>()
+        if (r.resultCode == RESULT_OK) {
+            val d = r.data
+            val clip = d?.clipData
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) clip.getItemAt(i).uri?.let { out.add(it) }
+            }
+            if (out.isEmpty()) d?.data?.let { out.add(it) }
+        }
+        fileCb?.onReceiveValue(if (out.isEmpty()) null else out.toTypedArray())
         fileCb = null
     }
 
@@ -125,7 +134,7 @@ class MainActivity : AppCompatActivity() {
             return true
         }
         val types = params.acceptTypes?.filter { it.isNotBlank() } ?: emptyList()
-        val multi = params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+        val multi = true // sempre permite escolher vários de uma vez
         val onlyMedia = types.isEmpty() || types.all { t ->
             val x = t.lowercase()
             x.startsWith("image") || x.startsWith("video") || x == "*/*" || x == "."
@@ -136,8 +145,9 @@ class MainActivity : AppCompatActivity() {
         // Caso geral: pergunta se é foto/vídeo (galeria) ou arquivo (gerenciador, pasta Downloads)
         return try {
             val sh = Sheet(this).title("Anexar", "O que você quer enviar?")
-            sh.row(R.drawable.ic_image, "Foto ou vídeo", "Abre a galeria do celular", highlighted = true) { launchGallery(multi) }
+            sh.row(R.drawable.ic_image, "Foto", "Abre a galeria do celular", highlighted = true) { launchGallery(multi) }
             sh.row(R.drawable.ic_folder, "Arquivo", "Abre a pasta Downloads, os mais recentes primeiro") { launchFilePicker(types, multi) }
+            sh.row(R.drawable.ic_play, "Vídeo", "Abre o gerenciador de arquivos nos vídeos do Android") { launchVideoPicker(multi) }
             sh.onCancel {
                 fileCb?.onReceiveValue(null)
                 fileCb = null
@@ -154,12 +164,35 @@ class MainActivity : AppCompatActivity() {
     private fun launchGallery(multi: Boolean) {
         try {
             val req = androidx.activity.result.PickVisualMediaRequest.Builder()
-                .setMediaType(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly)
                 .build()
             if (multi) multiPhotoPicker.launch(req) else photoPicker.launch(req)
         } catch (_: Exception) {
             fileCb?.onReceiveValue(null)
             fileCb = null
+        }
+    }
+
+    /** Gerenciador de arquivos do Android, já na aba de vídeos. */
+    private fun launchVideoPicker(multi: Boolean): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "video/*"
+                if (multi) putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    putExtra(
+                        android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                        android.provider.DocumentsContract.buildRootUri("com.android.providers.media.documents", "videos_root")
+                    )
+                }
+            }
+            docPicker.launch(intent)
+            true
+        } catch (_: Exception) {
+            fileCb?.onReceiveValue(null)
+            fileCb = null
+            false
         }
     }
 
