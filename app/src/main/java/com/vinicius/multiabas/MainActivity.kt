@@ -140,13 +140,13 @@ class MainActivity : AppCompatActivity() {
             x.startsWith("image") || x.startsWith("video") || x == "*/*" || x == "."
         }
         // Site pediu um tipo específico (pdf, zip…): vai direto pro gerenciador de arquivos
-        if (!onlyMedia) return launchFilePicker(types, multi)
+        if (!onlyMedia) return launchDownloadsList(types, multi)
 
         // Caso geral: pergunta se é foto/vídeo (galeria) ou arquivo (gerenciador, pasta Downloads)
         return try {
             val sh = Sheet(this).title("Anexar", "O que você quer enviar?")
             sh.row(R.drawable.ic_image, "Foto", "Abre a galeria do celular", highlighted = true) { launchGallery(multi) }
-            sh.row(R.drawable.ic_folder, "Arquivo", "Abre a pasta Downloads, os mais recentes primeiro") { launchFilePicker(types, multi) }
+            sh.row(R.drawable.ic_folder, "Arquivo", "Lista a pasta Downloads, os mais recentes primeiro") { launchDownloadsList(types, multi) }
             sh.row(R.drawable.ic_play, "Vídeo", "Abre o gerenciador de arquivos nos vídeos do Android") { launchVideoPicker(multi) }
             sh.onCancel {
                 fileCb?.onReceiveValue(null)
@@ -170,6 +170,40 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             fileCb?.onReceiveValue(null)
             fileCb = null
+        }
+    }
+
+    /** Lista própria da pasta Downloads (mais recentes primeiro). Precisa do acesso a todos os arquivos, liberado uma vez. */
+    private fun launchDownloadsList(types: List<String>, multi: Boolean): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < 30) return launchFilePicker(types, multi)
+        if (!DownloadsPicker.hasAccess()) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Liberar acesso aos arquivos")
+                .setMessage("Para listar a pasta Downloads com os mais recentes primeiro, o app precisa de acesso a arquivos. Toque em Abrir ajustes, ative a chave e volte aqui. Depois toque em anexar de novo.")
+                .setPositiveButton("Abrir ajustes") { _, _ ->
+                    fileCb?.onReceiveValue(null); fileCb = null
+                    try {
+                        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+                    } catch (_: Exception) {
+                        try { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } catch (_: Exception) {}
+                    }
+                }
+                .setNegativeButton("Usar seletor do Android") { _, _ -> launchFilePicker(types, multi) }
+                .setOnCancelListener { fileCb?.onReceiveValue(null); fileCb = null }
+                .show()
+            return true
+        }
+        return try {
+            DownloadsPicker.show(this,
+                onPick = { files ->
+                    fileCb?.onReceiveValue(files.map { Uri.fromFile(it) }.toTypedArray())
+                    fileCb = null
+                },
+                onOther = { launchFilePicker(types, multi) },
+                onCancel = { fileCb?.onReceiveValue(null); fileCb = null })
+            true
+        } catch (_: Exception) {
+            launchFilePicker(types, multi)
         }
     }
 
