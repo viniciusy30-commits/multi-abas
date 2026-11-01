@@ -32,6 +32,16 @@ class BuildPopup(private val act: Activity, projectName: String, title: String =
     private val btnInstall = MaterialButton(act)
     private val scroll = ScrollView(act)
     private var dialog: AlertDialog? = null
+    var finished = false
+        private set
+
+    companion object {
+        /** Última entrega/build, para reabrir a janela depois de minimizar. */
+        @JvmStatic var last: BuildPopup? = null
+    }
+
+    fun statusText(): String = (if (finished) "Terminou · " else "Em andamento · ") + status.text
+    fun reopen() { show() }
 
     private val cText = Ui.color(act, R.color.text)
     private val cMuted = Ui.color(act, R.color.muted)
@@ -42,6 +52,7 @@ class BuildPopup(private val act: Activity, projectName: String, title: String =
     private fun dp(v: Int) = Ui.dp(act, v)
 
     init {
+        last = this
         val root = LinearLayout(act).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(6), dp(22), dp(2))
@@ -98,7 +109,7 @@ class BuildPopup(private val act: Activity, projectName: String, title: String =
     private fun alive() = !act.isFinishing && !act.isDestroyed
 
     fun show() {
-        act.runOnUiThread { if (alive()) dialog?.show() }
+        act.runOnUiThread { if (alive() && dialog?.isShowing != true) dialog?.show() }
     }
 
     fun status(text: String) {
@@ -161,6 +172,7 @@ class BuildPopup(private val act: Activity, projectName: String, title: String =
     fun done(ok: Boolean, url: String?, apk: File?) {
         act.runOnUiThread {
             if (!alive()) return@runOnUiThread
+            finished = true
             bar.isIndeterminate = false
             bar.max = 100
             bar.progress = 100

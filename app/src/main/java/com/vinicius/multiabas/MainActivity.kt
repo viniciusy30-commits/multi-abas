@@ -116,8 +116,54 @@ class MainActivity : AppCompatActivity() {
             }
             if (out.isEmpty()) d?.data?.let { out.add(it) }
         }
-        fileCb?.onReceiveValue(if (out.isEmpty()) null else out.toTypedArray())
+        deliverUris(out)
+    }
+
+    /** Entrega os arquivos escolhidos ao site; se houver zip acima de 30 MB, oferece dividir em partes. */
+    private fun deliverUris(uris: List<Uri>) {
+        val cb = fileCb
         fileCb = null
+        if (uris.isEmpty()) { cb?.onReceiveValue(null); return }
+        val result = ArrayList<Uri>()
+        fun step(i: Int) {
+            if (i >= uris.size) { cb?.onReceiveValue(result.toTypedArray()); return }
+            val u = uris[i]
+            val inf = ZipSplitter.info(this, u)
+            if (inf.name.endsWith(".zip", true) && inf.size > ZipSplitter.THRESHOLD) {
+                val mb = inf.size / (1024 * 1024)
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Zip grande")
+                    .setMessage("${inf.name} tem $mb MB, acima de 30 MB. Dividir em partes de até 25 MB? As partes são enviadas juntas.")
+                    .setPositiveButton("Dividir") { _, _ ->
+                        val wait = MaterialAlertDialogBuilder(this)
+                            .setTitle("Dividindo…")
+                            .setMessage("Aguarde, pode levar um tempinho.")
+                            .setCancelable(false)
+                            .show()
+                        Thread {
+                            val parts = ZipSplitter.split(this, u, inf.name)
+                            runOnUiThread {
+                                wait.dismiss()
+                                if (parts.isEmpty()) {
+                                    say("Não deu para dividir, enviando o zip inteiro", true)
+                                    result.add(u)
+                                } else {
+                                    say("Dividido em ${parts.size} partes")
+                                    result.addAll(parts)
+                                }
+                                step(i + 1)
+                            }
+                        }.start()
+                    }
+                    .setNegativeButton("Enviar assim mesmo") { _, _ -> result.add(u); step(i + 1) }
+                    .setOnCancelListener { cb?.onReceiveValue(null) }
+                    .show()
+            } else {
+                result.add(u)
+                step(i + 1)
+            }
+        }
+        step(0)
     }
 
     private fun openFileChooser(params: WebChromeClient.FileChooserParams): Boolean {
@@ -196,8 +242,7 @@ class MainActivity : AppCompatActivity() {
         return try {
             DownloadsPicker.show(this,
                 onPick = { files ->
-                    fileCb?.onReceiveValue(files.map { Uri.fromFile(it) }.toTypedArray())
-                    fileCb = null
+                    deliverUris(files.map { Uri.fromFile(it) })
                 },
                 onOther = { launchFilePicker(types, multi) },
                 onCancel = { fileCb?.onReceiveValue(null); fileCb = null })
@@ -959,6 +1004,7 @@ window.addEventListener('click',function(e){
             Tile(R.drawable.ic_folder, "Projetos") { projectPicker() },
             Tile(R.drawable.ic_settings, "Ajustes") { settings() }
         ))
+        BuildPopup.last?.let { bp -> sh.row(R.drawable.ic_download, "Ver entrega / build", bp.statusText()) { bp.reopen() } }
         sh.section("Automação")
         sh.row(R.drawable.ic_play, "Script de tarefas", scriptSub(), highlighted = Script.status == Script.RUNNING) { scr.ui.showPanel() }
         sh.row(R.drawable.ic_grid, "Contas", accountsSub()) { showAccounts() }
@@ -1128,11 +1174,23 @@ window.addEventListener('click',function(e){
             return
         }
         autoFix.onZipDownloaded()
+        // confere o formato do ZIP (pasta externa, lixo) e ajusta antes de subir
+        Thread {
+            val norm = ZipNormalizer.normalize(bytes, proj.repo)
+            runOnUiThread { deliverZipNow(proj, zipName, norm.bytes, norm.notes) }
+        }.start()
+    }
+
+    private fun deliverZipNow(proj: Project, zipName: String, bytes: ByteArray, notes: List<String>) {
         val guessTab = tabs.getOrNull(cur)?.takeIf { webs[it.id]?.url?.contains("claude.ai") == true }?.id ?: Script.chatTabId
         val fixTab = autoFix.tabFor(guessTab)
         val popup = BuildPopup(this, proj.name)
         popup.show()
-        popup.status("Enviando $zipName → ${proj.name}…")
+        if (notes.isNotEmpty()) {
+            say("ZIP ajustado: " + notes.joinToString("; "), true)
+            Handoff.log(this, proj.id, "ZIP ajustado ($zipName): " + notes.joinToString("; "))
+        }
+        popup.status((if (notes.isEmpty()) "" else "ZIP ajustado ✓ (" + notes.joinToString("; ") + ")\n") + "Enviando $zipName → ${proj.name}…")
         Handoff.log(this, proj.id, "ZIP enviado: $zipName")
         var failLog = ""
         GitHubDelivery.deliver(
@@ -2349,6 +2407,7 @@ return 'none';})();"""
 
     override fun onDestroy() {
         handler.removeCallbacks(handoffTick)
+        if (isFinishing) BuildPopup.last = null
         // Se o usuário fechou de verdade (não só girou a tela), para o serviço
         if (isFinishing) KeepAliveService.stop(this)
         super.onDestroy()
