@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="updates" path="updates/" />
+    <cache-path name="game_apks" path="game_apks/" />
+    <cache-path name="repo_zips" path="repo_zips/" />
+    <cache-path name="handoff_out" path="handoff_out/" />
+    <cache-path name="script_code" path="script_code/" />
+    <cache-path name="script_txt" path="script_txt/" />
+    <cache-path name="script_out" path="script_out/" />
+    <cache-path name="partes" path="partes/" />
+</paths>
