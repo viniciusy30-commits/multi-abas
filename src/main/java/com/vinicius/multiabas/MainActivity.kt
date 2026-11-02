@@ -58,7 +58,7 @@ class MainActivity : AppCompatActivity() {
     private class DockAct(val id: String, val label: String, val icon: Int, val run: () -> Unit)
     private val dockIds = mutableListOf<String>()
     private fun allDockActs(): List<DockAct> = listOf(
-        DockAct("send_main", "Enviar main", R.drawable.ic_send) { sendMainToClaude() },
+        DockAct("send_main", "Baixar main", R.drawable.ic_send) { sendMainToClaude() },
         DockAct("script", "Ver script", R.drawable.ic_play) { scr.ui.showPanel() },
         DockAct("report", "Relatório", R.drawable.ic_info) { scr.ui.showReport() },
         DockAct("apk", "Baixar APK", R.drawable.ic_download) { downloadLatestApkNow() },
@@ -1020,7 +1020,7 @@ window.addEventListener('click',function(e){
         sh.row(R.drawable.ic_code, ptitle, psub, highlighted = true) { projectPicker() }
         sh.section("Ações rápidas")
         sh.tiles(listOf(
-            Tile(R.drawable.ic_send, "Enviar main pro Claude") { sendMainToClaude() },
+            Tile(R.drawable.ic_send, "Baixar main") { sendMainToClaude() },
             Tile(R.drawable.ic_download, "Baixar APK") { downloadLatestApkNow() },
             Tile(R.drawable.ic_play, "Abrir jogo") { openCurrentGame() },
             Tile(R.drawable.ic_refresh, "Recarregar") { webs[tabs[cur].id]?.reload() },
@@ -1253,6 +1253,7 @@ window.addEventListener('click',function(e){
     /**
      * Baixa o ZIP do branch do projeto (main/padrão) e anexa no chat do Claude aberto.
      */
+    /** Baixa o main do projeto atual e salva em Downloads; você anexa pelo + do Claude (o app divide se passar de 30 MB). */
     private fun sendMainToClaude() {
         val p = Projects.current(this)
         if (p == null) {
@@ -1260,15 +1261,8 @@ window.addEventListener('click',function(e){
             projectPicker()
             return
         }
-        // confere ANTES de baixar: precisa de uma aba do Claude aberta
-        val t0 = tabs.getOrNull(cur)
-        val w0 = if (t0 != null) webs[t0.id] else null
-        if (t0 == null || w0 == null || !(w0.url ?: "").contains("claude.ai")) {
-            say("Abra uma aba do Claude (um chat) e toque de novo", true)
-            return
-        }
         val token = Projects.token(this)
-        val popup = BuildPopup(this, p.name, "Enviar main")
+        val popup = BuildPopup(this, p.name, "Baixar main")
         popup.show()
         popup.status("Baixando o main de ${p.name}…")
         popup.progress(10)
@@ -1292,21 +1286,13 @@ window.addEventListener('click',function(e){
                 val zipF: java.io.File = zip
                 val nFiles = LeanZip.count(zipF)
                 val mb = zipF.length() / (1024 * 1024)
-                runOnUiThread { popup.status("Main baixado: $mb MB, $nFiles arquivos"); popup.progress(35) }
-                // até 29 MB vai inteiro; acima disso divide em partes (todos os arquivos)
-                var files: List<java.io.File> = listOf(zipF)
-                if (zipF.length() > 29L * 1024 * 1024) {
-                    val parts = ZipSplitter.split(this, Uri.fromFile(zipF), zipF.name).mapNotNull { u -> u.path?.let { java.io.File(it) } }
-                    if (parts.isNotEmpty()) files = parts
-                }
-                val sendList: List<java.io.File> = files
+                val name = "${p.name.replace(Regex("[^A-Za-z0-9._-]"), "-")}-$branch.zip"
+                saveFileToDownloads(zipF, name)
                 runOnUiThread {
-                    popup.status(
-                        if (sendList.size > 1) "Dividi em ${sendList.size} partes (cada uma até 25 MB). Anexando…"
-                        else "Anexando ${sendList.first().name}…"
-                    )
-                    popup.progress(50)
-                    deliverToClaude(sendList, popup)
+                    popup.progress(100)
+                    popup.status("Salvo em Downloads: $name ($mb MB, $nFiles arquivos). Agora anexe pelo + do Claude.")
+                    popup.done(true, null, null)
+                    say("Main salvo em Downloads: $name")
                 }
             } catch (e: Exception) {
                 runOnUiThread { popup.status("Erro: ${e.message}"); popup.done(false, null, null) }
@@ -1314,69 +1300,16 @@ window.addEventListener('click',function(e){
         }.start()
     }
 
-    /**
-     * Anexa os arquivos no chat do Claude. Três caminhos, nesta ordem:
-     * 1) seletor de arquivos armado + toques reais no "+" e no item de upload;
-     * 2) injeção direta na página (um arquivo por vez);
-     * 3) seletor armado esperando VOCÊ tocar no "+" (fica pronto por 3 minutos).
-     */
-    private fun deliverToClaude(files: List<java.io.File>, popup: BuildPopup) {
-        val t = tabs.getOrNull(cur)
-        val w = if (t != null) webs[t.id] else null
-        if (t == null || w == null || !(w.url ?: "").contains("claude.ai")) {
-            popup.status("Abra uma aba do Claude para anexar")
-            popup.done(false, null, null)
-            return
-        }
-        val uris = files.map { f -> androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f) }
-        val label = if (files.size > 1) "${files.size} partes" else files.first().name
-
-        fun ok() {
-            popup.progress(100)
-            popup.status("Anexado ✓ ($label). Agora é só enviar a mensagem.")
-            popup.done(true, null, null)
-            say("$label anexado ✓")
-        }
-
-        fun manual() {
-            // 3) deixa os arquivos prontos: quando você tocar no + e em "Adicionar arquivos", eles entram sozinhos
-            pendingClaudeFile = uris.toTypedArray()
-            popup.progress(70)
-            popup.status("Arquivos prontos ($label). Toque no + do Claude e em \"Adicionar arquivos\": eles entram sozinhos (vale por 3 minutos).")
-            say("Toque no + do Claude e em Adicionar arquivos", true)
-            fun poll(left: Int) {
-                when {
-                    pendingClaudeFile == null -> ok()
-                    left <= 0 -> {
-                        pendingClaudeFile = null
-                        for (f in files) { try { saveBytes(f.readBytes(), f.name, "application/zip") } catch (_: Exception) { } }
-                        popup.status("Não anexou. Salvei $label em Downloads para anexar pelo +.")
-                        popup.done(false, null, null)
-                    }
-                    else -> w.postDelayed({ poll(left - 1) }, 700)
-                }
-            }
-            poll(250)
-        }
-
-        fun inject(k: Int) {
-            // 2) injeção direta, um arquivo por vez (só até 25 MB cada)
-            if (k >= files.size) { ok(); return }
-            if (files[k].length() > 25L * 1024 * 1024) { manual(); return }
-            popup.status("Anexando ${files[k].name} (${k + 1}/${files.size})…")
-            attachZip(t, files[k], uris[k]) { done -> if (done) inject(k + 1) else manual() }
-        }
-
-        waitComposer(w, 20) { ready ->
-            if (!ready) {
-                popup.status("A caixa de mensagem do Claude não apareceu. Abra um chat e toque de novo.")
-                popup.done(false, null, null)
-                return@waitComposer
-            }
-            // 1) seletor armado + toques reais (pula a tentativa 0, que o Android bloqueia por não ser toque de verdade)
-            attachWithRetries(t, uris, 1) { done ->
-                if (done) ok() else inject(0)
-            }
+    private fun saveFileToDownloads(f: java.io.File, name: String) {
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val v = android.content.ContentValues()
+            v.put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+            v.put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/zip")
+            v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)!!
+            contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
+        } else {
+            f.copyTo(java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)!!, name), overwrite = true)
         }
     }
 
@@ -2315,7 +2248,7 @@ return 'none';})();"""
     private fun addToDock() {
         val sh = Sheet(this).title("Barra de baixo", "Favoritos e botões de ação ficam aqui")
         sh.row(R.drawable.ic_star, "Novo favorito", "Um link para abrir rápido") { editFav(-1) }
-        sh.row(R.drawable.ic_bolt, "Escolher botões de ação", "Enviar main, ver script, relatório, baixar APK…") { pickDockActions() }
+        sh.row(R.drawable.ic_bolt, "Escolher botões de ação", "Baixar main, ver script, relatório, baixar APK…") { pickDockActions() }
         sh.show()
     }
 
