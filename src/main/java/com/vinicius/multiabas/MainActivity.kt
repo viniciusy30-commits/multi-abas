@@ -316,7 +316,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
         setContentView(R.layout.activity_main)
+        window.decorView.post { showLastCrash() }
         container = findViewById(R.id.container)
         urlBar = findViewById(R.id.urlBar)
         urlIcon = findViewById(R.id.urlIcon)
@@ -498,6 +500,27 @@ class MainActivity : AppCompatActivity() {
         }
         @JavascriptInterface
         fun hfEnd(tok: String, summary: String) { hfSessions[tok]?.onEnd?.invoke(summary) }
+    }
+
+    /** Se o app fechou sozinho da última vez, mostra o erro para copiar ou salvar. */
+    private fun showLastCrash() {
+        val txt = CrashLog.pending(this) ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle("O app fechou da última vez")
+            .setMessage(txt.take(2500))
+            .setPositiveButton("Copiar") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("erro", txt))
+                say("Erro copiado")
+                CrashLog.clear(this)
+            }
+            .setNeutralButton("Salvar em Downloads") { _, _ ->
+                try { saveBytes(txt.toByteArray(), "erro-multi-abas.txt", "text/plain"); say("Salvo em Downloads: erro-multi-abas.txt") }
+                catch (_: Exception) { say("Não consegui salvar", true) }
+                CrashLog.clear(this)
+            }
+            .setNegativeButton("Fechar") { _, _ -> CrashLog.clear(this) }
+            .show()
     }
 
     private fun saveBytes(b: ByteArray, name: String, mime: String) {
@@ -1237,9 +1260,18 @@ window.addEventListener('click',function(e){
             projectPicker()
             return
         }
+        // confere ANTES de baixar: precisa de uma aba do Claude aberta
+        val t0 = tabs.getOrNull(cur)
+        val w0 = if (t0 != null) webs[t0.id] else null
+        if (t0 == null || w0 == null || !(w0.url ?: "").contains("claude.ai")) {
+            say("Abra uma aba do Claude (um chat) e toque de novo", true)
+            return
+        }
         val token = Projects.token(this)
-        // token ajuda em repo privado; público funciona sem
-        say("Baixando main de ${p.name}…")
+        val popup = BuildPopup(this, p.name, "Enviar main")
+        popup.show()
+        popup.status("Baixando o main de ${p.name}…")
+        popup.progress(10)
         Thread {
             try {
                 val branch = p.branch.ifBlank { "main" }
@@ -1247,72 +1279,105 @@ window.addEventListener('click',function(e){
                 for (i in 1..3) {
                     zip = GitHubDelivery.downloadRepoZip(this, token, p, branch)
                     if (zip != null && zip.exists() && LeanZip.count(zip) > 0) break
-                    if (i < 3) { runOnUiThread { say("Falhou ao baixar, tentando de novo ($i/3)…") }; Thread.sleep(1500) }
+                    zip = null
+                    if (i < 3) { runOnUiThread { popup.status("Falhou ao baixar, tentando de novo ($i/3)…") }; Thread.sleep(1500) }
                 }
-                if (zip == null || !zip.exists()) {
+                if (zip == null) {
                     runOnUiThread {
-                        say("Não foi possível baixar o ZIP de ${p.fullRepo()}@$branch", true)
+                        popup.status("Não consegui baixar o ZIP de ${p.fullRepo()}@$branch")
+                        popup.done(false, null, null)
                     }
                     return@Thread
                 }
                 val zipF: java.io.File = zip
                 val nFiles = LeanZip.count(zipF)
                 val mb = zipF.length() / (1024 * 1024)
-                runOnUiThread { say("Main baixado: $mb MB, $nFiles arquivos") }
-                var sendFiles: List<java.io.File> = listOf(zipF)
-                var aviso: String? = null
+                runOnUiThread { popup.status("Main baixado: $mb MB, $nFiles arquivos"); popup.progress(35) }
+                // até 29 MB vai inteiro; acima disso divide em partes (todos os arquivos)
+                var files: List<java.io.File> = listOf(zipF)
                 if (zipF.length() > 29L * 1024 * 1024) {
                     val parts = ZipSplitter.split(this, Uri.fromFile(zipF), zipF.name).mapNotNull { u -> u.path?.let { java.io.File(it) } }
-                    if (parts.isNotEmpty()) {
-                        sendFiles = parts
-                        aviso = "Passa de 29 MB: dividi em ${parts.size} partes e envio todas juntas."
-                    } else {
-                        aviso = "Não consegui dividir o main; vou tentar enviar inteiro."
-                    }
+                    if (parts.isNotEmpty()) files = parts
                 }
-                val sendFinal: List<java.io.File> = sendFiles
-                val avisoFinal: String? = aviso
+                val sendList: List<java.io.File> = files
                 runOnUiThread {
-                    val t = tabs.getOrNull(cur)
-                    if (t == null) { say("Nenhuma aba aberta", true); return@runOnUiThread }
-                    val w = webs[t.id]
-                    if (w == null || !(w.url ?: "").contains("claude.ai")) {
-                        say("Abra uma aba do Claude para anexar o main", true)
-                        return@runOnUiThread
-                    }
-                    val files: List<java.io.File> = sendFinal
-                    if (avisoFinal != null) say(avisoFinal, true)
-                    say("Anexando ${files.first().name} no Claude…")
-                    // espera a caixa de mensagem existir (página ainda carregando era a causa de falhar de primeira)
-                    waitComposer(w, 20) { ready ->
-                        if (!ready) {
-                            say("A caixa de mensagem do Claude não apareceu. Abra um chat e toque de novo.", true)
-                            return@waitComposer
-                        }
-                        // entrega todas as partes de uma vez pelo seletor de arquivos (igual ao envio manual)
-                        val uris = files.map { f -> androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f) }
-                        attachWithRetries(t, uris, 0) { ok ->
-                            if (ok) say(if (files.size > 1) "${files.size} partes anexadas ✓" else "${files.first().name} anexado ✓")
-                            else {
-                                // plano B: injeta um por vez na página
-                                fun inj(k: Int) {
-                                    if (k >= files.size) { say("${files.size} arquivo(s) anexado(s) ✓"); return }
-                                    attachZip(t, files[k], uris[k]) { ok2 ->
-                                        if (ok2) inj(k + 1)
-                                        else say("Não consegui anexar ${files[k].name}. Toque no + e escolha em Downloads", true)
-                                    }
-                                }
-                                inj(0)
-                            }
-                        }
-                    }
+                    popup.status(
+                        if (sendList.size > 1) "Dividi em ${sendList.size} partes (cada uma até 25 MB). Anexando…"
+                        else "Anexando ${sendList.first().name}…"
+                    )
+                    popup.progress(50)
+                    deliverToClaude(sendList, popup)
                 }
             } catch (e: Exception) {
-                runOnUiThread {
-                    say("Erro: ${e.message}", true)
-                }
+                runOnUiThread { popup.status("Erro: ${e.message}"); popup.done(false, null, null) }
             }
         }.start()
+    }
+
+    /**
+     * Anexa os arquivos no chat do Claude. Três caminhos, nesta ordem:
+     * 1) seletor de arquivos armado + toques reais no "+" e no item de upload;
+     * 2) injeção direta na página (um arquivo por vez);
+     * 3) seletor armado esperando VOCÊ tocar no "+" (fica pronto por 3 minutos).
+     */
+    private fun deliverToClaude(files: List<java.io.File>, popup: BuildPopup) {
+        val t = tabs.getOrNull(cur)
+        val w = if (t != null) webs[t.id] else null
+        if (t == null || w == null || !(w.url ?: "").contains("claude.ai")) {
+            popup.status("Abra uma aba do Claude para anexar")
+            popup.done(false, null, null)
+            return
+        }
+        val uris = files.map { f -> androidx.core.content.FileProvider.getUriForFile(this, packageName + ".fileprovider", f) }
+        val label = if (files.size > 1) "${files.size} partes" else files.first().name
+
+        fun ok() {
+            popup.progress(100)
+            popup.status("Anexado ✓ ($label). Agora é só enviar a mensagem.")
+            popup.done(true, null, null)
+            say("$label anexado ✓")
+        }
+
+        fun manual() {
+            // 3) deixa os arquivos prontos: quando você tocar no + e em "Adicionar arquivos", eles entram sozinhos
+            pendingClaudeFile = uris.toTypedArray()
+            popup.progress(70)
+            popup.status("Arquivos prontos ($label). Toque no + do Claude e em \"Adicionar arquivos\": eles entram sozinhos (vale por 3 minutos).")
+            say("Toque no + do Claude e em Adicionar arquivos", true)
+            fun poll(left: Int) {
+                when {
+                    pendingClaudeFile == null -> ok()
+                    left <= 0 -> {
+                        pendingClaudeFile = null
+                        for (f in files) { try { saveBytes(f.readBytes(), f.name, "application/zip") } catch (_: Exception) { } }
+                        popup.status("Não anexou. Salvei $label em Downloads para anexar pelo +.")
+                        popup.done(false, null, null)
+                    }
+                    else -> w.postDelayed({ poll(left - 1) }, 700)
+                }
+            }
+            poll(250)
+        }
+
+        fun inject(k: Int) {
+            // 2) injeção direta, um arquivo por vez (só até 25 MB cada)
+            if (k >= files.size) { ok(); return }
+            if (files[k].length() > 25L * 1024 * 1024) { manual(); return }
+            popup.status("Anexando ${files[k].name} (${k + 1}/${files.size})…")
+            attachZip(t, files[k], uris[k]) { done -> if (done) inject(k + 1) else manual() }
+        }
+
+        waitComposer(w, 20) { ready ->
+            if (!ready) {
+                popup.status("A caixa de mensagem do Claude não apareceu. Abra um chat e toque de novo.")
+                popup.done(false, null, null)
+                return@waitComposer
+            }
+            // 1) seletor armado + toques reais (pula a tentativa 0, que o Android bloqueia por não ser toque de verdade)
+            attachWithRetries(t, uris, 1) { done ->
+                if (done) ok() else inject(0)
+            }
+        }
     }
 
     /** Clica no botão de anexar / input file da página do Claude. */
