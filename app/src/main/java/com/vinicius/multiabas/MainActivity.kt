@@ -58,7 +58,7 @@ class MainActivity : AppCompatActivity() {
     private class DockAct(val id: String, val label: String, val icon: Int, val run: () -> Unit)
     private val dockIds = mutableListOf<String>()
     private fun allDockActs(): List<DockAct> = listOf(
-        DockAct("send_main", "Enviar main", R.drawable.ic_send) { sendMainToClaude() },
+        DockAct("send_main", "Baixar main", R.drawable.ic_send) { sendMainToClaude() },
         DockAct("script", "Ver script", R.drawable.ic_play) { scr.ui.showPanel() },
         DockAct("report", "Relatório", R.drawable.ic_info) { scr.ui.showReport() },
         DockAct("apk", "Baixar APK", R.drawable.ic_download) { downloadLatestApkNow() },
@@ -316,7 +316,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
         setContentView(R.layout.activity_main)
+        window.decorView.post { showLastCrash() }
         container = findViewById(R.id.container)
         urlBar = findViewById(R.id.urlBar)
         urlIcon = findViewById(R.id.urlIcon)
@@ -498,6 +500,27 @@ class MainActivity : AppCompatActivity() {
         }
         @JavascriptInterface
         fun hfEnd(tok: String, summary: String) { hfSessions[tok]?.onEnd?.invoke(summary) }
+    }
+
+    /** Se o app fechou sozinho da última vez, mostra o erro para copiar ou salvar. */
+    private fun showLastCrash() {
+        val txt = CrashLog.pending(this) ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle("O app fechou da última vez")
+            .setMessage(txt.take(2500))
+            .setPositiveButton("Copiar") { _, _ ->
+                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("erro", txt))
+                say("Erro copiado")
+                CrashLog.clear(this)
+            }
+            .setNeutralButton("Salvar em Downloads") { _, _ ->
+                try { saveBytes(txt.toByteArray(), "erro-multi-abas.txt", "text/plain"); say("Salvo em Downloads: erro-multi-abas.txt") }
+                catch (_: Exception) { say("Não consegui salvar", true) }
+                CrashLog.clear(this)
+            }
+            .setNegativeButton("Fechar") { _, _ -> CrashLog.clear(this) }
+            .show()
     }
 
     private fun saveBytes(b: ByteArray, name: String, mime: String) {
@@ -997,7 +1020,7 @@ window.addEventListener('click',function(e){
         sh.row(R.drawable.ic_code, ptitle, psub, highlighted = true) { projectPicker() }
         sh.section("Ações rápidas")
         sh.tiles(listOf(
-            Tile(R.drawable.ic_send, "Enviar main pro Claude") { sendMainToClaude() },
+            Tile(R.drawable.ic_send, "Baixar main") { sendMainToClaude() },
             Tile(R.drawable.ic_download, "Baixar APK") { downloadLatestApkNow() },
             Tile(R.drawable.ic_play, "Abrir jogo") { openCurrentGame() },
             Tile(R.drawable.ic_refresh, "Recarregar") { webs[tabs[cur].id]?.reload() },
@@ -1230,6 +1253,7 @@ window.addEventListener('click',function(e){
     /**
      * Baixa o ZIP do branch do projeto (main/padrão) e anexa no chat do Claude aberto.
      */
+    /** Baixa o main do projeto atual e salva em Downloads; você anexa pelo + do Claude (o app divide se passar de 30 MB). */
     private fun sendMainToClaude() {
         val p = Projects.current(this)
         if (p == null) {
@@ -1238,59 +1262,55 @@ window.addEventListener('click',function(e){
             return
         }
         val token = Projects.token(this)
-        // token ajuda em repo privado; público funciona sem
-        say("Baixando main de ${p.name}…")
+        val popup = BuildPopup(this, p.name, "Baixar main")
+        popup.show()
+        popup.status("Baixando o main de ${p.name}…")
+        popup.progress(10)
         Thread {
             try {
                 val branch = p.branch.ifBlank { "main" }
                 var zip: java.io.File? = null
                 for (i in 1..3) {
                     zip = GitHubDelivery.downloadRepoZip(this, token, p, branch)
-                    if (zip != null && zip.exists()) break
-                    if (i < 3) { runOnUiThread { say("Falhou ao baixar, tentando de novo ($i/3)…") }; Thread.sleep(1500) }
+                    if (zip != null && zip.exists() && LeanZip.count(zip) > 0) break
+                    zip = null
+                    if (i < 3) { runOnUiThread { popup.status("Falhou ao baixar, tentando de novo ($i/3)…") }; Thread.sleep(1500) }
                 }
-                if (zip == null || !zip.exists()) {
+                if (zip == null) {
                     runOnUiThread {
-                        say("Não foi possível baixar o ZIP de ${p.fullRepo()}@$branch", true)
+                        popup.status("Não consegui baixar o ZIP de ${p.fullRepo()}@$branch")
+                        popup.done(false, null, null)
                     }
                     return@Thread
                 }
-                val uri = androidx.core.content.FileProvider.getUriForFile(
-                    this, packageName + ".fileprovider", zip
-                )
+                val zipF: java.io.File = zip
+                val nFiles = LeanZip.count(zipF)
+                val mb = zipF.length() / (1024 * 1024)
+                val name = "${p.name.replace(Regex("[^A-Za-z0-9._-]"), "-")}-$branch.zip"
+                saveFileToDownloads(zipF, name)
                 runOnUiThread {
-                    val t = tabs.getOrNull(cur)
-                    if (t == null) { say("Nenhuma aba aberta", true); return@runOnUiThread }
-                    val w = webs[t.id]
-                    if (w == null || !(w.url ?: "").contains("claude.ai")) {
-                        say("Abra uma aba do Claude para anexar o main", true)
-                        return@runOnUiThread
-                    }
-                    val zf: java.io.File = zip
-                    say("Anexando ${zf.name} no Claude…")
-                    // espera a caixa de mensagem existir (página ainda carregando era a causa de falhar de primeira)
-                    waitComposer(w, 20) { ready ->
-                        if (!ready) {
-                            say("A caixa de mensagem do Claude não apareceu. Abra um chat e toque de novo.", true)
-                            return@waitComposer
-                        }
-                        // mesmo caminho do Script: campo de arquivo → arrastar → menu do +, e confere se o anexo apareceu
-                        fun go(n: Int) {
-                            attachZip(t, zf, uri) { ok ->
-                                if (ok) say("${zf.name} anexado ✓")
-                                else if (n < 3) { say("Tentando anexar de novo ($n/3)…"); go(n + 1) }
-                                else say("Não consegui anexar sozinho. Toque no + e escolha ${zf.name} em Downloads", true)
-                            }
-                        }
-                        go(1)
-                    }
+                    popup.progress(100)
+                    popup.status("Salvo em Downloads: $name ($mb MB, $nFiles arquivos). Agora anexe pelo + do Claude.")
+                    popup.done(true, null, null)
+                    say("Main salvo em Downloads: $name")
                 }
             } catch (e: Exception) {
-                runOnUiThread {
-                    say("Erro: ${e.message}", true)
-                }
+                runOnUiThread { popup.status("Erro: ${e.message}"); popup.done(false, null, null) }
             }
         }.start()
+    }
+
+    private fun saveFileToDownloads(f: java.io.File, name: String) {
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val v = android.content.ContentValues()
+            v.put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+            v.put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/zip")
+            v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)!!
+            contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
+        } else {
+            f.copyTo(java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)!!, name), overwrite = true)
+        }
     }
 
     /** Clica no botão de anexar / input file da página do Claude. */
@@ -1832,7 +1852,7 @@ window.addEventListener('click',function(e){
         val w = webs[to.id]
         if (w == null) { result(false); return }
         attLog("Anexando ${f.name} (${f.length() / 1024} KB)")
-        if (f.length() > 25L * 1024 * 1024) { attachWithRetries(to, uri, 1, result); return }
+        if (f.length() > 25L * 1024 * 1024) { attachWithRetries(to, uri, 0, result); return }
         Thread {
             val b64 = try { android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP) } catch (e: Exception) { null }
             runOnUiThread {
@@ -1933,10 +1953,14 @@ return 'none';})();"""
     }
 
     /** Tenta abrir o seletor de arquivos do Claude e entregar o ZIP; confere se o seletor foi usado. */
-    private fun attachWithRetries(to: Tab, uri: Uri, attempt: Int, result: (Boolean) -> Unit) {
+    private fun attachWithRetries(to: Tab, uri: Uri, attempt: Int, result: (Boolean) -> Unit) =
+        attachWithRetries(to, listOf(uri), attempt, result)
+
+    private fun attachWithRetries(to: Tab, uris: List<Uri>, attempt: Int, result: (Boolean) -> Unit) {
+        val uri = uris.first()
         val w = webs[to.id]
         if (w == null) { result(false); return }
-        pendingClaudeFile = arrayOf(uri)
+        pendingClaudeFile = uris.toTypedArray()
         if (attempt == 0) {
             w.evaluateJavascript("(function(){var i=document.querySelector('input[type=file]');if(i){i.click();return 'input';}return 'none';})();", null)
         } else {
@@ -1949,7 +1973,7 @@ return 'none';})();"""
         w.postDelayed({
             when {
                 pendingClaudeFile == null -> { attLog("Anexo: o seletor de arquivos recebeu o ZIP (tentativa $attempt)"); result(true) }
-                attempt < 3 -> attachWithRetries(to, uri, attempt + 1, result)
+                attempt < 3 -> attachWithRetries(to, uris, attempt + 1, result)
                 else -> { pendingClaudeFile = null; attLog("Anexo: não consegui por nenhum caminho; vou tentar de novo"); result(false) }
             }
         }, if (attempt == 0) 2000L else 3500L)
@@ -2224,7 +2248,7 @@ return 'none';})();"""
     private fun addToDock() {
         val sh = Sheet(this).title("Barra de baixo", "Favoritos e botões de ação ficam aqui")
         sh.row(R.drawable.ic_star, "Novo favorito", "Um link para abrir rápido") { editFav(-1) }
-        sh.row(R.drawable.ic_bolt, "Escolher botões de ação", "Enviar main, ver script, relatório, baixar APK…") { pickDockActions() }
+        sh.row(R.drawable.ic_bolt, "Escolher botões de ação", "Baixar main, ver script, relatório, baixar APK…") { pickDockActions() }
         sh.show()
     }
 
