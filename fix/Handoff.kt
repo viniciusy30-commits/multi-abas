@@ -1,0 +1,606 @@
+package com.vinicius.multiabas
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.zip.CRC32
+import java.util.zip.CheckedInputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+
+/**
+ * Continuar o projeto em outra conta quando o limite da primeira acaba.
+ *
+ * - Enquanto você conversa, o app guarda (a cada ~15s) o texto da conversa de cada aba do Claude.
+ * - Cada ZIP entregue ao GitHub fica registrado num log por projeto.
+ * - Na hora de trocar de conta, monta um ZIP com: instruções (LEIA-ME-PRIMEIRO.md),
+ *   a conversa anterior, o log de entregas e o código atual do repositório.
+ */
+object Handoff {
+
+    /** Lê a conversa visível na página do Claude e detecta aviso de limite (fora das mensagens). */
+    const val CAPTURE_JS = """(function(){try{
+var sel='[data-testid="user-message"], .font-claude-response, .font-claude-message, [data-is-streaming]';
+var nodes=document.querySelectorAll(sel), seen=[], parts=[];
+nodes.forEach(function(n){
+  for(var i=0;i<seen.length;i++){ if(seen[i].contains(n)) return; }
+  seen.push(n);
+  var t=(n.innerText||'').trim();
+  if(!t) return;
+  var u=n.matches('[data-testid="user-message"]');
+  parts.push((u?'### VOCÊ':'### CLAUDE')+'\n'+t);
+});
+var body=(document.body&&document.body.innerText)||'';
+if(!parts.length){
+  var m=document.querySelector('main');
+  if(m&&(m.innerText||'').trim().length>0) parts.push((m.innerText||'').trim());
+}
+var rest=body;
+seen.forEach(function(n){ try{ rest=rest.replace(n.innerText,''); }catch(e){} });
+rest=rest.slice(-1500);
+var re=/sem\s+mensagens|mensagens\s+gratuitas|(you.?ve|you have)\s+(reached|hit)\s+(your|the)\b.{0,50}limit|usage limit|limit\s+(will\s+)?reset|resets?\s+(at|in|on)\s|atingiu\s+o\s+limite|limite\s.{0,40}(redefin|reinici|volt|renov)|volta(r[áa])?\s.{0,20}\d/i;
+var mm=re.exec(rest);
+var ctx=mm?rest.substr(mm.index,240).replace(/\s+/g,' ').trim():'';
+return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:!!mm,h:ctx});
+}catch(e){return JSON.stringify({t:'',u:'',x:'',l:false});}})();"""
+
+    data class Snap(val title: String, val url: String, val text: String, val limit: Boolean, val until: String = "")
+
+    /** evaluateJavascript devolve a string JS como literal JSON: desembrulha e lê o objeto. */
+    fun parse(raw: String?): Snap? {
+        if (raw.isNullOrBlank() || raw == "null") return null
+        return try {
+            val s = JSONArray("[$raw]").getString(0)
+            val o = JSONObject(s)
+            Snap(o.optString("t"), o.optString("u"), o.optString("x"), o.optBoolean("l"), o.optString("h"))
+        } catch (_: Exception) { null }
+    }
+
+    private fun dir(ctx: Context) = File(ctx.filesDir, "handoff").apply { mkdirs() }
+    private fun chatFile(ctx: Context, tabId: String) = File(dir(ctx), "chat_$tabId.txt")
+    private fun metaFile(ctx: Context, tabId: String) = File(dir(ctx), "chat_$tabId.json")
+    private fun logFile(ctx: Context, projectId: String) = File(dir(ctx), "log_$projectId.txt")
+
+    private fun now() = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+
+    /** Pasta onde fica uma cópia de TUDO que o Claude entregou (ZIPs, imagens, PDFs...), por projeto. */
+    private fun archiveDir(ctx: Context, projectId: String) =
+        File(dir(ctx), "entregues_${projectId.ifBlank { "geral" }}").apply { mkdirs() }
+
+    /** Guarda uma cópia do arquivo que o Claude acabou de entregar, para ir no pacote de continuação. */
+    fun archive(ctx: Context, projectId: String, name: String, bytes: ByteArray) {
+        try {
+            val clean = name.replace(Regex("[^\\w.\\-]+"), "_").trim('.').ifEmpty { "arquivo" }
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+            val dirF = archiveDir(ctx, projectId)
+            val crc = CRC32().also { it.update(bytes) }.value
+            val dup = dirF.listFiles()?.any { it.isFile && it.length() == bytes.size.toLong() && fileCrc(it) == crc } == true
+            if (!dup) File(dirF, "$stamp-$clean").writeBytes(bytes)
+        } catch (_: Exception) { }
+    }
+
+    /** Guarda a conversa da aba. Só reescreve se mudou e se veio conteúdo de verdade. */
+    fun save(ctx: Context, tabId: String, s: Snap) {
+        if (s.text.length < 40) return
+        if (!s.url.contains("/chat/")) return
+        try {
+            val f = chatFile(ctx, tabId)
+            val old = if (f.exists()) f.readText() else ""
+            val body = "Título: ${s.title}\nLink: ${s.url}\n\n${s.text}"
+            if (old.substringAfter("\n\n", "") == s.text) return
+            // não troca uma conversa longa por um pedaço curto da MESMA conversa (página ainda carregando)
+            val sameChat = old.contains("Link: ${s.url}")
+            if (sameChat && s.text.length < (old.length * 0.5).toInt()) return
+            f.writeText(body)
+            metaFile(ctx, tabId).writeText(
+                JSONObject().put("title", s.title).put("url", s.url).put("time", now()).toString()
+            )
+        } catch (_: Exception) { }
+    }
+
+    fun hasChat(ctx: Context, tabId: String) = chatFile(ctx, tabId).let { it.exists() && it.length() > 40 }
+
+    fun chatInfo(ctx: Context, tabId: String): String? = try {
+        val o = JSONObject(metaFile(ctx, tabId).readText())
+        o.optString("time") + " · " + o.optString("title").take(40)
+    } catch (_: Exception) { null }
+
+    /** Uma linha por evento (ZIP enviado, build ok/falhou). Guarda as últimas 60. */
+    fun log(ctx: Context, projectId: String, line: String) {
+        try {
+            val f = logFile(ctx, projectId)
+            val lines = (if (f.exists()) f.readLines() else emptyList()) + "${now()} | $line"
+            f.writeText(lines.takeLast(60).joinToString("\n"))
+        } catch (_: Exception) { }
+    }
+
+    private fun readLog(ctx: Context, projectId: String): String =
+        try { logFile(ctx, projectId).readText() } catch (_: Exception) { "" }
+
+    fun unquote(raw: String?): String? {
+        if (raw.isNullOrBlank() || raw == "null") return null
+        return try { JSONArray("[$raw]").getString(0) } catch (_: Exception) { null }
+    }
+
+    /** Abre os blocos recolhidos ("executou N comandos") da ÚLTIMA resposta do Claude. Devolve quantos abriu. */
+    const val EXPAND_JS = """(function(){var all=document.querySelectorAll('[data-is-streaming]');
+if(!all.length)all=document.querySelectorAll('.font-claude-response,.font-claude-message');
+var m=all[all.length-1];if(!m)return '0';
+var bs=m.querySelectorAll('button[aria-expanded="false"]');var n=0;
+for(var i=0;i<bs.length;i++){try{bs[i].click();n++;}catch(e){}}
+return String(n);})();"""
+
+    /** Texto da última resposta do Claude (com os blocos já abertos). */
+    const val READ_LAST_JS = """(function(){var all=document.querySelectorAll('[data-is-streaming]');
+if(!all.length)all=document.querySelectorAll('.font-claude-response,.font-claude-message');
+var m=all[all.length-1];if(!m)return '';
+return (m.innerText||'').trim();})();"""
+
+    /** Monta o File do anexo (base64 já em window.__hf) e guarda em window.__hfDt. */
+    const val BUILD_JS = """(function(name){try{var b=atob(window.__hf);var u=new Uint8Array(b.length);
+for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
+var f=new File([u],name,{type:__MIME__});var dt=new DataTransfer();dt.items.add(f);
+window.__hfDt=dt;window.__hf='';return 'ok';}catch(e){return 'err:'+e.message;}})(__NAME__);"""
+
+    /** Entrega o arquivo à página: direto no input[type=file] ou simulando arrastar-e-soltar. */
+    const val INJECT_JS = """(function(mode){try{var dt=window.__hfDt;if(!dt)return 'nodt';
+if(mode==='input'){var ins=document.querySelectorAll('input[type=file]'),pick=null;
+for(var j=0;j<ins.length;j++){var a=(ins[j].getAttribute('accept')||'').toLowerCase();
+if(!a||a.indexOf('zip')>=0||a.indexOf('*/*')>=0||(a.indexOf('.')>=0&&a.indexOf('image')<0)){pick=ins[j];break;}}
+if(!pick&&ins.length)pick=ins[0];
+if(!pick)return 'noinput';
+pick.files=dt.files;
+pick.dispatchEvent(new Event('input',{bubbles:true}));
+pick.dispatchEvent(new Event('change',{bubbles:true}));
+return 'input';}
+var ed=document.querySelector('div[contenteditable="true"]');
+if(!ed)return 'noeditor';
+var t=ed.closest('fieldset,form')||ed.parentElement||ed;
+['dragenter','dragover','drop'].forEach(function(n){t.dispatchEvent(new DragEvent(n,{bubbles:true,cancelable:true,dataTransfer:dt}));});
+return 'drop';}catch(e){return 'err:'+e.message;}})('__MODE__');"""
+
+    /** Salva o chat inteiro: abre todos os blocos, guarda texto, HTML, imagens, links e arquivos. */
+    const val FULL_JS = """(function(tok){
+var A=window.AndroidDl;
+if(!A||!A.hfEnd){return 'nobridge';}
+function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+function nodesOf(){
+ var sel='[data-testid="user-message"], .font-claude-response, .font-claude-message, [data-is-streaming]';
+ var all=document.querySelectorAll(sel),out=[];
+ all.forEach(function(n){for(var i=0;i<out.length;i++){if(out[i].contains(n))return;}out.push(n);});
+ return out;
+}
+function extOf(m){m=(m||'').toLowerCase();
+ if(m.indexOf('png')>=0)return 'png';if(m.indexOf('jpeg')>=0||m.indexOf('jpg')>=0)return 'jpg';
+ if(m.indexOf('webp')>=0)return 'webp';if(m.indexOf('gif')>=0)return 'gif';if(m.indexOf('svg')>=0)return 'svg';
+ if(m.indexOf('pdf')>=0)return 'pdf';if(m.indexOf('zip')>=0)return 'zip';if(m.indexOf('json')>=0)return 'json';
+ if(m.indexOf('text')>=0)return 'txt';return 'bin';}
+var total=0,LIMIT=250*1024*1024;
+function readAs(blob){return new Promise(function(res){var fr=new FileReader();fr.onloadend=function(){res(fr.result);};fr.onerror=function(){res(null);};fr.readAsDataURL(blob);});}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+async function grab(src,folder,base,fname){
+ try{
+  var blob;
+  if(src.indexOf('data:')===0){var r0=await fetch(src);blob=await r0.blob();}
+  else{var r=await fetch(src,{credentials:'include'});if(!r.ok)return null;blob=await r.blob();}
+  if((blob.type||'').indexOf('text/html')===0)return null;
+  if(blob.size<200||blob.size>60*1024*1024||total+blob.size>LIMIT)return null;
+  var name=fname||(base+'.'+extOf(blob.type));
+  var du=await readAs(blob);if(!du)return null;
+  total+=blob.size;
+  A.hfBin(tok,folder+'/'+name,blob.type||'',du);
+  return folder+'/'+name;
+ }catch(e){return null;}
+}
+async function grabApi(src,folder,fname){
+ try{
+  var r=await fetch(src,{credentials:'include'});if(!r.ok)return null;
+  var blob=await r.blob();
+  if(blob.size<1||blob.size>25*1024*1024||total+blob.size>LIMIT)return null;
+  var du=await readAs(blob);if(!du)return null;
+  total+=blob.size;
+  A.hfBin(tok,folder+'/'+fname,blob.type||'',du);
+  return folder+'/'+fname;
+ }catch(e){return null;}
+}
+(async function(){
+ var sum={msgs:0,imgs:0,files:0,chars:0,err:''};
+ try{
+  A.hfProgress(tok,'Abrindo todos os blocos recolhidos…');
+  for(var round=0;round<4;round++){
+   var opened=0;
+   nodesOf().forEach(function(m){m.querySelectorAll('button[aria-expanded="false"]').forEach(function(b){try{b.click();opened++;}catch(e){}});});
+   if(!opened)break;
+   await sleep(900);
+  }
+  var nodes=nodesOf(),parts=[],html=[],links=[],last='';
+  for(var i=0;i<nodes.length;i++){
+   var n=nodes[i],isU=n.matches('[data-testid="user-message"]');
+   var t=(n.innerText||'').trim();
+   if(!t&&!n.querySelector('img'))continue;
+   parts.push((isU?'### VOCÊ':'### CLAUDE')+'\n'+t);
+   if(isU){last='';}else if(t){last=t;}
+   var c=n.cloneNode(true);
+   c.querySelectorAll('script,style,iframe,video,audio').forEach(function(x){x.remove();});
+   var oi=n.querySelectorAll('img'),ci=c.querySelectorAll('img');
+   for(var j=0;j<oi.length&&j<ci.length;j++){
+    var src=oi[j].currentSrc||oi[j].src||'';
+    if(!src)continue;
+    var w=oi[j].naturalWidth||0;
+    if((w&&w<48)||/avatar|favicon|emoji/i.test(src)){ci[j].remove();continue;}
+    A.hfProgress(tok,'Salvando imagem '+(sum.imgs+1)+'…');
+    var loc=await grab(src,'imagens','img_'+(sum.imgs+1));
+    if(loc){sum.imgs++;ci[j].setAttribute('src',loc);ci[j].removeAttribute('srcset');}
+   }
+   if(!isU){
+    n.querySelectorAll('pre').forEach(function(pr){
+     var ct=(pr.innerText||'').trim();if(ct.length<20)return;
+     var cd=pr.querySelector('code'),cl=((cd&&cd.className)||'')+' '+(pr.className||'');
+     var lm=/language-([\w+#-]+)/.exec(cl),lang=lm?lm[1].toLowerCase():'txt';
+     var map={kotlin:'kt',python:'py',javascript:'js',typescript:'ts',bash:'sh',shell:'sh',yaml:'yml',markdown:'md'};
+     sum.code=(sum.code||0)+1;
+     var fnm='codigo-do-chat/bloco_'+String(sum.code).padStart(3,'0')+'.'+(map[lang]||lang);
+     A.hfText(tok,fnm,ct);
+    });
+    n.querySelectorAll('svg').forEach(function(sv){
+     var bb=sv.getBoundingClientRect();if(bb.width<80||bb.height<80)return;
+     sum.svgs=(sum.svgs||0)+1;
+     A.hfText(tok,'imagens/svg_'+sum.svgs+'.svg',new XMLSerializer().serializeToString(sv));
+    });
+   }
+   n.querySelectorAll('a[href]').forEach(function(a){var h=a.href;if(h&&h.indexOf('javascript')!==0)links.push({t:(a.innerText||'').trim().slice(0,80),h:h,d:a.getAttribute('download')||''});});
+   html.push('<div class="'+(isU?'u':'c')+'"><b>'+(isU?'VOCÊ':'CLAUDE')+'</b>'+c.innerHTML+'</div>');
+  }
+  var seen={},lt=[];
+  for(var k=0;k<links.length;k++){var L=links[k];if(seen[L.h])continue;seen[L.h]=1;lt.push((L.t||'(sem texto)')+' -> '+L.h);}
+  var dl=links.filter(function(L){return L.d||/\/(download|files?|attachments?|artifacts?)\b|\.(zip|pdf|docx?|xlsx?|pptx?|csv|json|txt|md|apk|png|jpe?g|webp|gif|svg|py|kt|js|html?|xml)(\?|$)/i.test(L.h);}).slice(0,200);
+  for(var q=0;q<dl.length;q++){
+   var D=dl[q];
+   var fn=(D.d||D.h.split('?')[0].split('/').pop()||('arquivo_'+(q+1))).replace(/[^\w.\-]+/g,'_');
+   A.hfProgress(tok,'Baixando arquivo '+(q+1)+' de '+dl.length+'…');
+   var loc2=await grab(D.h,'arquivos','f'+q,fn);if(loc2)sum.files++;
+  }
+  try{
+   var cm=/\/chat\/([0-9a-fA-F-]{36})/.exec(location.pathname),cid=cm?cm[1]:'';
+   if(cid){
+    A.hfProgress(tok,'Lendo a conversa inteira pelo servidor…');
+    var orgs=[],om=/(?:^|;\s*)lastActiveOrg=([0-9a-fA-F-]{36})/.exec(document.cookie);
+    if(om)orgs.push(om[1]);
+    try{var ro=await fetch('/api/organizations',{credentials:'include'});var oj=await ro.json();
+     (oj||[]).forEach(function(o){if(o&&o.uuid&&orgs.indexOf(o.uuid)<0)orgs.push(o.uuid);});}catch(e){}
+    var cj=null,org='';
+    for(var oi=0;oi<orgs.length&&!cj;oi++){
+     try{
+      var rc=await fetch('/api/organizations/'+orgs[oi]+'/chat_conversations/'+cid+'?tree=True&rendering_mode=messages&render_all_tools=true',{credentials:'include'});
+      if(rc.ok){var rawj=await rc.text();cj=JSON.parse(rawj);org=orgs[oi];A.hfText(tok,'conversa-bruta.json',rawj);}
+     }catch(e){}
+    }
+    if(!cj){sum.apiErr='não consegui ler a conversa pelo servidor';}
+    else{
+     var made={},arts={},cmds=[],skipped=[],present=[],attach=[];
+     var emap={'text/html':'html','application/vnd.ant.react':'jsx','image/svg+xml':'svg','text/markdown':'md','application/vnd.ant.mermaid':'mermaid'};
+     (cj.chat_messages||[]).forEach(function(msg){
+      (msg.files_v2||msg.files||[]).forEach(function(f){attach.push(f);});
+      (msg.content||[]).forEach(function(b){
+       if(!b||b.type!=='tool_use'||!b.input)return;
+       var i=b.input,nm=b.name;
+       if(nm==='create_file'&&i.path){made[i.path]=String(i.file_text||'');}
+       else if(nm==='str_replace'&&i.path&&i.old_str!==undefined){
+        if(made[i.path]!==undefined&&made[i.path].indexOf(i.old_str)>=0){var ns=String(i.new_str||'');made[i.path]=made[i.path].replace(i.old_str,function(){return ns;});}
+        else skipped.push(i.path+' (edição sobre arquivo que não foi criado pelo create_file)');
+       }
+       else if(nm==='bash_tool'&&i.command){cmds.push('# '+(i.description||'')+'\n'+i.command);}
+       else if(nm==='present_files'&&i.filepaths){i.filepaths.forEach(function(x){present.push(x);});}
+       else if(nm==='artifacts'&&i.id){
+        var a=arts[i.id]||(arts[i.id]={title:i.title||i.id,ext:emap[i.type]||i.language||'txt',content:''});
+        if(i.title)a.title=i.title;
+        if((i.command==='create'||i.command==='rewrite')&&i.content!==undefined)a.content=String(i.content);
+        else if(i.command==='update'&&i.old_str!==undefined&&a.content.indexOf(i.old_str)>=0){var n2=String(i.new_str||'');a.content=a.content.replace(i.old_str,function(){return n2;});}
+       }
+      });
+     });
+     var mk=Object.keys(made);
+     for(var mi=0;mi<mk.length;mi++){A.hfText(tok,'arquivos-criados/'+mk[mi].replace(/^\/+/,''),made[mk[mi]]);sum.created=(sum.created||0)+1;}
+     var ak=Object.keys(arts);
+     for(var ai=0;ai<ak.length;ai++){if(arts[ak[ai]].content){A.hfText(tok,'artifacts/'+(arts[ak[ai]].title||ak[ai]).replace(/[^\w.-]+/g,'_')+'.'+arts[ak[ai]].ext,arts[ak[ai]].content);sum.arts=(sum.arts||0)+1;}}
+     if(cmds.length)A.hfText(tok,'comandos-bash.txt',cmds.join('\n\n----------\n\n'));
+     if(skipped.length)A.hfText(tok,'edicoes-nao-aplicadas.txt',skipped.join('\n'));
+     A.hfText(tok,'anexos-do-chat.json',JSON.stringify(attach));
+     for(var fi=0;fi<attach.length;fi++){
+      var af=attach[fi],au=af.preview_url||af.thumbnail_url||'';
+      if(au&&(af.file_kind==='image'||/image/i.test(af.file_kind||''))){
+       A.hfProgress(tok,'Baixando imagem enviada '+(fi+1)+' de '+attach.length+'…');
+       var sv=await grabApi(au,'imagens-anexadas',(af.file_uuid||('x'+fi)).slice(0,8)+'_'+(af.file_name||'imagem.png'));
+       if(sv)sum.attach=(sum.attach||0)+1;
+      }
+     }
+     var base='/api/organizations/'+org+'/conversations/'+cid+'/wiggle/',paths=present.slice();
+     var lq=['','?prefix=%2Fmnt%2Fuser-data%2Foutputs','?path=%2Fmnt%2Fuser-data%2Foutputs'];
+     for(var li=0;li<lq.length;li++){
+      try{
+       var lr=await fetch(base+'list-files'+lq[li],{credentials:'include'});
+       if(!lr.ok)continue;
+       var lj=await lr.json();
+       var arr=Array.isArray(lj)?lj:(lj.files||lj.paths||lj.items||[]);
+       arr.forEach(function(x){var pp=typeof x==='string'?x:(x&&(x.path||x.name||x.file_path));if(pp&&typeof pp==='string'&&paths.indexOf(pp)<0)paths.push(pp);});
+       if(paths.length)break;
+      }catch(e){}
+     }
+     paths=paths.slice(0,300);
+     for(var pi=0;pi<paths.length;pi++){
+      A.hfProgress(tok,'Baixando arquivo do Claude '+(pi+1)+' de '+paths.length+'…');
+      var pth=paths[pi];
+      var gp=await grabApi(base+'download-file?path='+encodeURIComponent(pth),'arquivos-do-chat',pth.replace(/^\/+/,''));
+      if(gp)sum.sandbox=(sum.sandbox||0)+1;
+     }
+     sum.listed=paths.length;
+    }
+   }
+  }catch(e){sum.apiErr=String(e&&e.message||e);}
+  var full=parts.join('\n\n');
+  sum.msgs=parts.length;sum.chars=full.length;
+  A.hfText(tok,'conversa-completa.txt',full);
+  if(last)A.hfText(tok,'ultima-resposta.txt',last);
+  if(lt.length)A.hfText(tok,'links.txt',lt.join('\n'));
+  var doc='<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(document.title)+'</title><style>body{font-family:sans-serif;background:#111;color:#eee;max-width:820px;margin:auto;padding:12px;line-height:1.5}.u{background:#1d2740;border-radius:12px;padding:10px;margin:16px 0}.c{margin:16px 0}pre{background:#000;padding:8px;overflow:auto;white-space:pre-wrap;border-radius:8px}img{max-width:100%}a{color:#8ab4ff}</style>'+html.join('\n');
+  if(doc.length<8000000)A.hfText(tok,'conversa.html',doc);
+ }catch(e){sum.err=String(e&&e.message||e);}
+ A.hfEnd(tok,JSON.stringify(sum));
+})();
+return 'started';
+})('__TOKEN__');"""
+
+    const val STARTER = "Estou continuando um projeto que começou em outra conta do Claude " +
+        "(o limite de lá acabou). Anexei um ZIP: leia primeiro o LEIA-ME-PRIMEIRO.md, depois a " +
+        "conversa-anterior.txt; o código atual está na pasta codigo/. Entenda onde paramos e " +
+        "continue exatamente de onde parou, sem refazer o que já está pronto. Eu só uso o celular: " +
+        "entregue as mudanças como ZIP pronto para baixar (os arquivos alterados/novos na estrutura " +
+        "do projeto), nunca código para copiar e colar. Se houver um trabalho-incompleto.txt, ele mostra " +
+        "o que o Claude anterior estava fazendo quando o limite acabou: termine a partir dali. A pasta " +
+        "chat-completo/ tem a conversa inteira com todos os blocos abertos, as imagens, os blocos de código e os links; " +
+        "arquivos-do-claude/ tem cópia de tudo (ZIPs, imagens, arquivos) que o Claude anterior entregou; " +
+        "dentro de chat-completo/, arquivos-criados/ e arquivos-do-chat/ têm os arquivos que ele fez mas não chegou a mandar em ZIP: use-os como base e entregue tudo junto em ZIP."
+
+    private fun slug(s: String): String =
+        java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "").replace(Regex("[^A-Za-z0-9]+"), "-").trim('-').lowercase().ifEmpty { "chat" }
+
+    private fun skip(path: String): Boolean {
+        val p = path.lowercase()
+        // só ficam de fora o .git e as chaves de assinatura (segredo); ZIPs, APKs e o resto entram
+        return p.startsWith(".git/") || p.endsWith(".keystore") || p.endsWith(".jks")
+    }
+
+    private fun put(z: ZipOutputStream, name: String, text: String) {
+        z.putNextEntry(ZipEntry(name))
+        z.write(text.toByteArray(Charsets.UTF_8))
+        z.closeEntry()
+    }
+
+    /** Copia a entrada atual do zip de origem para o de destino e guarda o CRC do conteúdo (para achar duplicatas depois). */
+    private fun copyWithCrc(zi: java.io.InputStream, z: ZipOutputStream, name: String, crcs: HashMap<String, Long>) {
+        val cin = CheckedInputStream(zi, CRC32())
+        cin.copyTo(z)
+        crcs[name] = cin.checksum.value
+    }
+
+    private fun fileCrc(f: File): Long {
+        val c = CRC32()
+        val buf = ByteArray(64 * 1024)
+        f.inputStream().use { i -> while (true) { val n = i.read(buf); if (n < 0) break; c.update(buf, 0, n) } }
+        return c.value
+    }
+
+    /** O arquivo \"caminho\" com este CRC já está idêntico em codigo/? Testa o caminho inteiro e também sem as pastas do começo. */
+    private fun inCode(crcs: Map<String, Long>, path: String, crc: Long): Boolean {
+        var p = path.replace('\\', '/').trimStart('/')
+        while (true) {
+            if (crcs[p] == crc) return true
+            val i = p.indexOf('/')
+            if (i < 0) return false
+            p = p.substring(i + 1)
+        }
+    }
+
+    /**
+     * Um arquivo é redundante quando TODO o conteúdo dele já está idêntico em codigo/ (mesmo caminho e mesmo CRC).
+     * Num ZIP, todas as entradas têm que bater; se uma só for diferente ou nova, o ZIP inteiro é mantido.
+     */
+    private fun redundant(f: File, crcs: Map<String, Long>): Boolean {
+        if (crcs.isEmpty()) return false
+        return try {
+            if (f.name.endsWith(".zip", true)) {
+                ZipFile(f).use { zf ->
+                    var n = 0
+                    for (e in zf.entries()) {
+                        if (e.isDirectory) continue
+                        n++
+                        if (e.crc < 0 || !inCode(crcs, e.name, e.crc)) return false
+                    }
+                    n > 0
+                }
+            } else false
+        } catch (_: Exception) { false }
+    }
+
+    /**
+     * Monta o ZIP de continuação em cache/handoff_out. Devolve o arquivo ou null se não deu.
+     * Roda fora da thread principal (baixa o código pelo GitHub).
+     */
+    fun build(
+        ctx: Context, fromName: String, fromTabId: String,
+        project: Project?, token: String, unfinished: String?, extraDir: File?, prefix: String,
+        overlay: Map<String, ByteArray>? = null,
+        progress: String? = null,
+        onStatus: (String) -> Unit
+    ): File? {
+        val transcript = try { chatFile(ctx, fromTabId).readText() } catch (_: Exception) { "" }
+        if (transcript.isBlank() && project == null && extraDir == null) return null
+
+        val outDir = File(ctx.cacheDir, "handoff_out").apply { mkdirs() }
+        outDir.listFiles()?.forEach { it.delete() }
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
+        val out = File(outDir, "$prefix-${slug(project?.name ?: fromName)}-$stamp.zip")
+
+        val ov: Map<String, ByteArray>? = overlay ?: (if (Script.mission) Script.overlay(ctx) else null)
+        val log = if (project != null) readLog(ctx, project.id) else ""
+        val branch = project?.branch?.ifBlank { "main" } ?: "main"
+
+        var codeOk = false
+        val crcs = HashMap<String, Long>()
+        var skippedN = 0
+        var skippedBytes = 0L
+        ZipOutputStream(out.outputStream().buffered()).use { z ->
+            if (project != null && token.isNotBlank()) {
+                onStatus("Baixando o código atual de ${project.fullRepo()}…")
+                val rz = GitHubDelivery.downloadRepoZip(ctx, token, project, branch)
+                if (rz != null && rz.exists()) {
+                    onStatus("Empacotando o código…")
+                    ZipInputStream(rz.inputStream().buffered()).use { zi ->
+                        var e = zi.nextEntry
+                        while (e != null) {
+                            val n = e.name.substringAfter('/', "")
+                            if (n.isNotEmpty() && !e.isDirectory && !skip(n) && ov?.containsKey(n) != true) {
+                                z.putNextEntry(ZipEntry("codigo/$n"))
+                                copyWithCrc(zi, z, n, crcs)
+                                z.closeEntry()
+                            }
+                            e = zi.nextEntry
+                        }
+                    }
+                    codeOk = true
+                }
+            }
+            if (!codeOk) {
+                // GitHub falhou (sem rede, token, limite da API…): usa a cópia do código guardada no aparelho
+                val bf = Mission.baseFile(ctx)
+                if (bf.exists()) {
+                    onStatus("Usando a cópia do código guardada no aparelho…")
+                    try {
+                        ZipInputStream(bf.inputStream().buffered()).use { zi ->
+                            var e = zi.nextEntry
+                            while (e != null) {
+                                val n = e.name.removePrefix("codigo/")
+                                if (!e.isDirectory && e.name.startsWith("codigo/") && !skip(n) && ov?.containsKey(n) != true) {
+                                    z.putNextEntry(ZipEntry(e.name))
+                                    copyWithCrc(zi, z, n, crcs)
+                                    z.closeEntry()
+                                }
+                                e = zi.nextEntry
+                            }
+                        }
+                        codeOk = true
+                    } catch (_: Exception) { }
+                }
+            }
+            if (!ov.isNullOrEmpty()) {
+                onStatus("Aplicando as tarefas já feitas do script…")
+                ov.forEach { (n, b) ->
+                    z.putNextEntry(ZipEntry("codigo/$n"))
+                    z.write(b)
+                    z.closeEntry()
+                    crcs[n] = CRC32().also { it.update(b) }.value
+                }
+            }
+            if (Script.mission) {
+                // o plano principal e o andamento, em arquivos de verdade (não dependem de ler o chat)
+                val orig = Mission.original(ctx)
+                val live = Mission.living(ctx)
+                val diary = Mission.diary(ctx)
+                if (orig.isNotBlank()) put(z, "PLANO-ORIGINAL.md", orig)
+                if (live.isNotBlank()) put(z, "PLANO-VIVO.md", live)
+                if (diary.isNotBlank()) put(z, "diario-da-missao.txt", diary.takeLast(60_000))
+            }
+            if (project != null) {
+                val files = archiveDir(ctx, project.id).listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
+                if (files.isNotEmpty()) {
+                    onStatus("Juntando ${files.size} arquivo(s) entregue(s) pelo Claude…")
+                    val seen = HashSet<String>()
+                    files.forEach { f ->
+                        // o mesmo arquivo baixado duas vezes, ou um ZIP cujo conteúdo já está idêntico em codigo/, não precisa ir de novo
+                        val key = f.length().toString() + ":" + (try { fileCrc(f) } catch (_: Exception) { -1L })
+                        if (!seen.add(key) || redundant(f, crcs)) { skippedN++; skippedBytes += f.length(); return@forEach }
+                        z.putNextEntry(ZipEntry("arquivos-do-claude/${f.name}"))
+                        f.inputStream().use { it.copyTo(z) }
+                        z.closeEntry()
+                    }
+                }
+            }
+            onStatus("Salvando a conversa…")
+            put(z, "conversa-anterior.txt", transcript.ifBlank { "(nenhuma conversa capturada nesta aba)" })
+            put(z, "entregas.txt", log.ifBlank { "(nenhuma entrega registrada)" })
+            if (!unfinished.isNullOrBlank()) put(z, "trabalho-incompleto.txt", unfinished)
+            if (!progress.isNullOrBlank()) put(z, "PROGRESSO-DO-SCRIPT.md", progress)
+            if (extraDir != null && extraDir.exists()) {
+                extraDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                    val rel = file.relativeTo(extraDir).path.replace('\\', '/')
+                    // arquivos que o Claude criou/baixou e que já estão idênticos em codigo/ (ou ZIPs que só repetem o código)
+                    if (rel.startsWith("arquivos-criados/") || rel.startsWith("arquivos-do-chat/") || rel.startsWith("arquivos/")) {
+                        val dup = try {
+                            if (file.name.endsWith(".zip", true)) redundant(file, crcs)
+                            else inCode(crcs, rel.substringAfter('/'), fileCrc(file))
+                        } catch (_: Exception) { false }
+                        if (dup) { skippedN++; skippedBytes += file.length(); return@forEach }
+                    }
+                    z.putNextEntry(ZipEntry("chat-completo/$rel"))
+                    file.inputStream().use { it.copyTo(z) }
+                    z.closeEntry()
+                }
+            }
+
+            val tail = transcript.takeLast(6000)
+            val md = buildString {
+                appendLine("# Continuação de projeto — LEIA PRIMEIRO")
+                appendLine()
+                appendLine("Gerado em ${now()} pelo app Multi Abas, porque o limite da conta \"$fromName\" acabou.")
+                appendLine("Você (Claude) está assumindo o trabalho de onde a outra conta parou.")
+                appendLine()
+                appendLine("## O que tem neste ZIP")
+                appendLine("- `conversa-anterior.txt` — a conversa completa da conta anterior (use para entender pedidos, decisões e pendências).")
+                appendLine("- `entregas.txt` — ZIPs que já foram entregues ao GitHub e o resultado do build.")
+                if (Script.mission) {
+                    appendLine("- `PLANO-ORIGINAL.md` — **o pedido original completo** (o plano principal). O objetivo não muda.")
+                    appendLine("- `PLANO-VIVO.md` — o plano com passos [x] prontos e [ ] pendentes e o próximo passo exato (se ainda não existir, o Claude anterior não chegou a entregar o primeiro ZIP).")
+                    appendLine("- `diario-da-missao.txt` — linha do tempo: contas usadas, limites, ZIPs aceitos e recusados.")
+                }
+                if (!progress.isNullOrBlank()) appendLine("- `PROGRESSO-DO-SCRIPT.md` — **leia primeiro**: quais tarefas do script já estão CONCLUÍDAS (não refazer), quais arquivos cada uma mudou e em que ponto a tarefa atual parou.")
+                appendLine("- `arquivos-do-claude/` — cópia de TUDO que o Claude entregou nesta conta (ZIPs, imagens, PDFs...), mesmo o que nunca foi para o GitHub. Se algo daqui não estiver em `codigo/`, ainda não foi aplicado.")
+                if (extraDir != null) appendLine("- `chat-completo/` — o chat salvo por inteiro: `conversa-completa.txt` (com todos os blocos abertos), `conversa.html` (abre no navegador, com as imagens), `imagens/`, `arquivos/`, `codigo-do-chat/` (cada bloco de código do chat em arquivo separado), `links.txt`, e o que foi lido direto do servidor do Claude: `arquivos-criados/` (todo arquivo que o Claude anterior criou, já com as edições aplicadas, mesmo os que nunca foram baixados), `arquivos-do-chat/` (os arquivos prontos da conta anterior), `imagens-anexadas/`, `artifacts/`, `comandos-bash.txt` e `conversa-bruta.json`.")
+                if (!unfinished.isNullOrBlank()) appendLine("- `trabalho-incompleto.txt` — a última resposta do Claude anterior, com comandos e arquivos que ele estava criando quando o limite acabou. O que estiver aqui e NÃO estiver em `codigo/` foi escrito mas nunca entregue: termine/recrie a partir daqui, sem recomeçar do zero.")
+                if (!ov.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${ov.size} arquivo(s)).")
+                if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
+                else appendLine("- (o código não pôde ser baixado; peça ao usuário o ZIP do projeto se precisar dele)")
+                if (skippedN > 0) appendLine("- Nota: $skippedN arquivo(s) (${skippedBytes / 1048576} MB) NÃO foram incluídos por já estarem idênticos em `codigo/` ou repetidos; nada se perdeu.")
+                appendLine()
+                if (project != null) {
+                    appendLine("## Projeto")
+                    appendLine("- Nome: ${project.name}")
+                    appendLine("- Repositório: ${project.fullRepo()} (branch `$branch`)")
+                    appendLine("- Entrega: ZIPs com os arquivos alterados/novos vão para `${project.folder}/` e um workflow descompacta, faz commit e gera o APK.")
+                    if (project.packageName.isNotBlank()) appendLine("- Package: ${project.packageName}")
+                    appendLine()
+                }
+                appendLine("## Como trabalhar")
+                if (Script.mission) appendLine("00. MISSÃO: leia PLANO-ORIGINAL.md e PLANO-VIVO.md antes de tudo; o que está [x] não se refaz; siga as REGRAS DA MISSÃO da mensagem do chat.")
+                if (!progress.isNullOrBlank()) appendLine("0. Tarefas marcadas ✓ em `PROGRESSO-DO-SCRIPT.md` já estão prontas e aplicadas em `codigo/`: NÃO refaça, NÃO reescreva.")
+                appendLine("1. Leia `conversa-anterior.txt`, principalmente o final: o último pedido pode estar incompleto.")
+                appendLine("2. Confira em `codigo/` o que já existe antes de mexer; não refaça o que está pronto.")
+                appendLine("3. O usuário só usa o celular: entregue tudo como ZIP pronto para baixar, nunca código para copiar e colar.")
+                appendLine("4. Se algo estiver ambíguo, pergunte antes de reescrever.")
+                appendLine()
+                appendLine("## Final da conversa anterior (resumo rápido)")
+                appendLine("```")
+                appendLine(tail.ifBlank { "(vazio)" })
+                appendLine("```")
+            }
+            put(z, "LEIA-ME-PRIMEIRO.md", md)
+        }
+        return if (out.length() > 100) out else null
+    }
+}
