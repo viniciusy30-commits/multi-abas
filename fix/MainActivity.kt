@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         DockAct("reload", "Recarregar", R.drawable.ic_refresh) { webs[tabs[cur].id]?.reload() },
         DockAct("projects", "Projetos", R.drawable.ic_folder) { projectPicker() },
         DockAct("accounts", "Contas", R.drawable.ic_grid) { showAccounts() },
+        DockAct("browser", "Navegador", R.drawable.ic_star) { linkBrowser.openPanel() },
         DockAct("handoff", "Outra conta", R.drawable.ic_refresh) { manualHandoff() },
         DockAct("paste", "Texto grande", R.drawable.ic_send) { pasteLargeText() },
         DockAct("settings", "Ajustes", R.drawable.ic_settings) { settings() },
@@ -74,6 +75,7 @@ class MainActivity : AppCompatActivity() {
     private fun dockActs(): List<DockAct> { val all = allDockActs(); return dockIds.mapNotNull { id -> all.firstOrNull { it.id == id } } }
     private val favAdapter = FavAdapter()
     private var favWeb: WebView? = null
+    private lateinit var linkBrowser: LinkBrowser
     private val limitAsked = HashSet<String>()
     private val limitLearned = HashSet<String>()
     /** limitSrc = CLEARED → o usuário mexeu no limite à mão; ignora o aviso da página até ele sumir. */
@@ -164,6 +166,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         step(0)
+    }
+
+    /** Seletor de arquivos pedido pelo navegador flutuante (usa o mesmo fluxo das abas). */
+    internal fun browserPick(cb: ValueCallback<Array<Uri>>, p: WebChromeClient.FileChooserParams): Boolean {
+        fileCb?.onReceiveValue(null)
+        fileCb = cb
+        return openFileChooser(p)
     }
 
     private fun openFileChooser(params: WebChromeClient.FileChooserParams): Boolean {
@@ -320,6 +329,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         window.decorView.post { showLastCrash() }
         container = findViewById(R.id.container)
+        linkBrowser = LinkBrowser(this)
         urlBar = findViewById(R.id.urlBar)
         urlIcon = findViewById(R.id.urlIcon)
         progress = findViewById(R.id.progress)
@@ -349,6 +359,7 @@ class MainActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (linkBrowser.onBack()) return
                 val fw = favWeb
                 if (fw != null) { if (fw.canGoBack()) fw.goBack() else closeFav(); return }
                 val w = webs[tabs[cur].id]
@@ -422,6 +433,12 @@ class MainActivity : AppCompatActivity() {
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val sc = r.url.scheme ?: ""
+                // link tocado de verdade pelo usuário → abre na bolinha (navegador flutuante)
+                if ((sc == "http" || sc == "https") && r.isForMainFrame && r.hasGesture() && !r.isRedirect &&
+                    linkBrowser.wants(v.url, r.url)) {
+                    linkBrowser.open(r.url.toString())
+                    return true
+                }
                 if (sc == "http" || sc == "https") return githubToChrome(v, r)
                 try { startActivity(Intent(Intent.ACTION_VIEW, r.url)) } catch (e: Exception) { }
                 return true
@@ -1025,6 +1042,7 @@ window.addEventListener('click',function(e){
             Tile(R.drawable.ic_play, "Abrir jogo") { openCurrentGame() },
             Tile(R.drawable.ic_refresh, "Recarregar") { webs[tabs[cur].id]?.reload() },
             Tile(R.drawable.ic_folder, "Projetos") { projectPicker() },
+            Tile(R.drawable.ic_star, "Navegador") { linkBrowser.openPanel() },
             Tile(R.drawable.ic_settings, "Ajustes") { settings() }
         ))
         BuildPopup.last?.let { bp -> sh.row(R.drawable.ic_download, "Ver entrega / build", bp.statusText()) { bp.reopen() } }
@@ -2473,6 +2491,7 @@ return 'none';})();"""
 
     override fun onDestroy() {
         handler.removeCallbacks(handoffTick)
+        try { linkBrowser.detach() } catch (_: Exception) { }
         if (isFinishing) BuildPopup.last = null
         // Se o usuário fechou de verdade (não só girou a tela), para o serviço
         if (isFinishing) KeepAliveService.stop(this)
