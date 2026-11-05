@@ -428,18 +428,11 @@ class MainActivity : AppCompatActivity() {
         s.setSupportZoom(true)
         s.builtInZoomControls = true
         s.displayZoomControls = false
-        s.setSupportMultipleWindows(true)
         s.userAgentString = s.userAgentString.replace("; wv", "").replace(Regex("Version/\\d+\\.\\d+ "), "")
         CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val sc = r.url.scheme ?: ""
-                // link tocado de verdade pelo usuário → abre na bolinha (navegador flutuante)
-                if ((sc == "http" || sc == "https") && r.isForMainFrame && r.hasGesture() && !r.isRedirect &&
-                    linkBrowser.wants(v.url, r.url)) {
-                    linkBrowser.open(r.url.toString())
-                    return true
-                }
                 if (sc == "http" || sc == "https") return githubToChrome(v, r)
                 try { startActivity(Intent(Intent.ACTION_VIEW, r.url)) } catch (e: Exception) { }
                 return true
@@ -455,27 +448,6 @@ class MainActivity : AppCompatActivity() {
                     progress.visibility = if (p < 100) View.VISIBLE else View.GONE
                 }
             }
-            /** Link com target=_blank / window.open: se for para um site de fora, vai para a bolinha; senão carrega na própria aba (como antes). */
-            override fun onCreateWindow(v: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message): Boolean {
-                val tmp = WebView(v.context)
-                tmp.webViewClient = object : WebViewClient() {
-                    private var done = false
-                    private fun route(u: Uri?): Boolean {
-                        val sc = u?.scheme ?: ""
-                        if (sc != "http" && sc != "https") return false
-                        if (done) return true
-                        done = true
-                        if (isUserGesture && linkBrowser.wants(v.url, u!!)) linkBrowser.open(u.toString()) else v.loadUrl(u.toString())
-                        tmp.post { try { tmp.stopLoading(); tmp.destroy() } catch (_: Exception) { } }
-                        return true
-                    }
-                    override fun shouldOverrideUrlLoading(w: WebView, r: WebResourceRequest): Boolean = route(r.url)
-                    override fun onPageStarted(w: WebView, u: String?, f: Bitmap?) { route(if (u == null) null else Uri.parse(u)) }
-                }
-                (resultMsg.obj as WebView.WebViewTransport).webView = tmp
-                resultMsg.sendToTarget()
-                return true
-            }
             override fun onPermissionRequest(request: PermissionRequest) { handleWebPermission(request) }
             override fun onPermissionRequestCanceled(request: PermissionRequest) {
                 if (pendingWebPerm === request) pendingWebPerm = null
@@ -486,6 +458,7 @@ class MainActivity : AppCompatActivity() {
                 return openFileChooser(p)
             }
         }
+        w.setOnLongClickListener { linkLongPress(w) }
         setupDownload(w)
         container.addView(w)
         w.loadUrl(t.url)
@@ -775,6 +748,40 @@ window.addEventListener('click',function(e){
  openPicker();
 },true);
 })();"""
+
+    /** Segurar o dedo num link: oferece abrir na bolinha (navegador flutuante). */
+    private fun linkLongPress(w: WebView): Boolean {
+        fun ok(u: String?) = !u.isNullOrBlank() && (u.startsWith("http://") || u.startsWith("https://"))
+        val r = w.hitTestResult
+        if (r.type == WebView.HitTestResult.SRC_ANCHOR_TYPE || r.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+            val u = r.extra
+            if (ok(u)) { showLinkMenu(u!!); return true }
+        }
+        // alguns links não aparecem no hitTest: pergunta ao WebView qual link está sob o dedo
+        val msg = android.os.Handler(android.os.Looper.getMainLooper()) { m ->
+            val u = m.data?.getString("url")
+            if (ok(u)) showLinkMenu(u!!)
+            true
+        }.obtainMessage()
+        w.requestFocusNodeHref(msg)
+        return false
+    }
+
+    private fun showLinkMenu(url: String) {
+        val shortU = url.removePrefix("https://").removePrefix("http://").removePrefix("www.")
+        Sheet(this).title("Link", if (shortU.length > 70) shortU.take(70) + "…" else shortU)
+            .row(R.drawable.ic_star, "Abrir na bolinha", "Navegador flutuante, em uma aba nova", highlighted = true) { linkBrowser.open(url) }
+            .row(R.drawable.ic_refresh, "Abrir nesta aba") { webs[tabs[cur].id]?.loadUrl(url) }
+            .row(R.drawable.ic_send, "Abrir no Chrome") {
+                try { androidx.browser.customtabs.CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(url)) } catch (_: Exception) { }
+            }
+            .row(R.drawable.ic_edit, "Copiar link") {
+                (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("link", url))
+                say("Link copiado")
+            }
+            .show()
+    }
 
     private fun githubToChrome(v: WebView, r: WebResourceRequest): Boolean {
         if (!r.isForMainFrame) return false

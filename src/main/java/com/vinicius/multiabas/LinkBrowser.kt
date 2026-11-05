@@ -105,27 +105,6 @@ class LinkBrowser(private val act: MainActivity) {
 
     // ───────────────────────── regras de quais links vêm para cá ─────────────────────────
 
-    private val internalHosts = listOf("claude.ai", "claude.com")
-
-    private fun reg(h: String): String {
-        val p = h.split('.')
-        return if (p.size <= 2) h else p.takeLast(2).joinToString(".")
-    }
-
-    /** Link tocado numa aba do app: deve abrir na bolinha? Login (Google, Apple, GitHub...) e o próprio Claude ficam onde estão. */
-    fun wants(fromUrl: String?, to: Uri): Boolean {
-        if (!prefs.getBoolean("capture", true)) return false
-        val host = to.host?.lowercase() ?: return false
-        if (internalHosts.any { host == it || host.endsWith(".$it") }) return false
-        val path = (to.path ?: "").lowercase()
-        if (listOf("login.", "accounts.", "auth.", "sso.", "signin.", "id.").any { host.startsWith(it) }) return false
-        if (listOf("/login", "/oauth", "/authorize", "/signin", "/session", "/sso", "/apps/", "/settings/connections").any { path.startsWith(it) || path.contains(it + "/") }) return false
-        if (host == "appleid.apple.com" || host == "login.microsoftonline.com" || host == "login.live.com") return false
-        val from = Uri.parse(fromUrl ?: "").host?.lowercase() ?: ""
-        if (from.isNotEmpty() && reg(from) == reg(host)) return false
-        return true
-    }
-
     // ───────────────────────── interface pública ─────────────────────────
 
     /** Abre o link numa aba nova do navegador flutuante e mostra o painel. */
@@ -614,7 +593,6 @@ class LinkBrowser(private val act: MainActivity) {
         pm.menu.add(0, 2, 1, "Copiar link")
         pm.menu.add(0, 3, 2, "Fechar esta aba")
         pm.menu.add(0, 4, 3, "Fechar todas as abas")
-        pm.menu.add(0, 5, 4, if (prefs.getBoolean("capture", true)) "Links do app abrem aqui: LIGADO" else "Links do app abrem aqui: DESLIGADO")
         pm.setOnMenuItemClickListener { m ->
             val t = currentTab()
             when (m.itemId) {
@@ -627,11 +605,6 @@ class LinkBrowser(private val act: MainActivity) {
                 }
                 3 -> closeTab(LinkStore.cur)
                 4 -> closeAll()
-                5 -> {
-                    val on = !prefs.getBoolean("capture", true)
-                    prefs.edit().putBoolean("capture", on).apply()
-                    Toast.makeText(act, if (on) "Links do app vão abrir na bolinha" else "Links do app abrem na própria aba", Toast.LENGTH_SHORT).show()
-                }
             }
             true
         }
