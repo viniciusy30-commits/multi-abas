@@ -1,0 +1,205 @@
+#id 2026-11-04-a
+#titulo Bolinha de links (navegador flutuante)
+- Todo link tocado numa aba do app (que não seja do Claude nem de login) abre numa aba da bolinha 🌐, em vez de tirar você da conversa
+- Toque na bolinha para abrir o navegador; arraste para mudar de lugar (ela gruda na lateral). O número mostra quantas abas estão abertas
+- Dentro dele: barra de endereço que também pesquisa no Google, voltar/avançar/recarregar, nova aba, e o botão de quadrado com número abre TODAS as abas em tela cheia (toque para ir, ✕ para fechar, "Fechar todas")
+- ▾ minimiza de volta para a bolinha. O botão voltar do celular volta a página e, sem histórico, minimiza
+- As abas ficam salvas: mesmo fechando o app elas voltam quando você abrir de novo, e enquanto houver aba aberta o app continua rodando em segundo plano
+- Menu ⋮: abrir no Chrome, copiar link, fechar aba, e um interruptor para ligar/desligar "links do app abrem aqui". A bolinha também está no menu e pode ser posta na barra de ações
+
+#id 2026-11-02-a
+#titulo Baixar main, anexos e zips grandes
+- O botão "Enviar main" agora se chama "Baixar main": baixa o main do projeto, confere se o ZIP está inteiro e salva em Downloads para você anexar pelo +
+- Anexar vários arquivos de uma vez funciona; a lista de Downloads mostra os mais recentes primeiro e tem a opção Vídeo
+- ZIP com mais de 30 MB: o app oferece dividir em partes e envia todas juntas
+- ZIP baixado do Claude é ajustado sozinho antes de subir para o GitHub (tira a pasta externa e arquivos lixo)
+- A janela de build pode ser reaberta pelo menu (Ver entrega / build)
+- Se o app fechar sozinho, na próxima abertura ele mostra o erro para você copiar
+
+#id 2026-10-30-b
+#titulo Missão automática + continuação que não perde o plano
+- Novo: Missão automática (Script > Modo automático). Você descreve o pedido UMA vez; o app conduz o Claude em rodadas, aceita cada ZIP, e termina com o ZIP final já salvo em Downloads, pronto para subir no GitHub
+- O pedido original fica salvo no aparelho palavra por palavra (PLANO-ORIGINAL.md) e o Claude mantém um PLANO-VIVO.md dentro de cada ZIP (passos [x] e [ ], decisões e próximo passo). É isso que a conta nova lê para continuar, em vez de depender só de ler o chat
+- Diário da missão: contas usadas, limites, ZIPs aceitos e recusados. Dá para ver o plano original, o plano vivo e o diário no painel do Script
+- ZIP conferido antes de contar: se vier corrompido, com "..." ou "resto do código igual", XML quebrado ou arquivo muito menor que o original, o app recusa e pede a correção ao Claude. Pasta embrulhando tudo é tirada sozinha
+- Troca de conta mais segura: antes de levar o projeto, o app abre a conta de destino e confere se está logada e fora do limite; se não estiver, pula para a próxima. Limite sem horário no aviso agora vale 30 min em vez de a conta parecer liberada
+- O pacote para a outra conta usa a cópia do código guardada no aparelho se o GitHub falhar
+- Se o app fechar no meio, a missão retoma de onde estava (sem reenviar a tarefa). Envio travado por 10 min é refeito sozinho
+
+#id 2026-10-30-a
+#titulo Abas mais limpas, aba guardada e + direto
+- Faixa de abas redesenhada: cada conta é um cartão compacto com bolinha de estado (verde = liberada, laranja = em recarga com o tempo que falta). Nada mais cortado embaixo
+- Novo botão de grade ao lado do +: tela Contas com tudo separado em Liberadas, Em recarga e Guardadas
+- Guardar aba (segure a aba): trava a conta para continuar depois. Ela sai da faixa, descarrega a página e o Script e a troca de conta nunca usam. Toque nela em Contas para destravar
+- Anotação por conta: escreva em que projeto ela está ou onde você parou
+- Tocar no + do Claude agora abre direto a escolha entre foto/vídeo e arquivo (arquivo abre em Downloads, mais novos primeiro). Segure o + para o menu de sempre. Dá para desligar em Ajustes
+- Enviar main agora anexa sozinho pelo mesmo caminho do Script (campo de arquivo, arrastar, menu do +) e confere se o anexo apareceu
+- Removido o medidor de uso 0–100%, que não funcionava
+
+#id 2026-10-27-h
+#titulo Script não dá mais ZIP errado como entregue + medidor mais preciso
+- Corrige: o Script pegava o próprio ZIP do código (codigo-...zip, o que o app manda) como se fosse a entrega do Claude e dava a tarefa como concluída quando o limite acabava. Agora ele ignora esse ZIP e troca de conta para continuar
+- O ZIP só conta se vier DEPOIS da sua mensagem, nunca de anexos; se faltar, o Script continua em outra conta até o Claude entregar de verdade
+- Corrige também na conta nova: o pacote de continuação (continuar-...zip, com a conversa anterior) era baixado como se fosse a entrega. Agora o app guarda a assinatura de tudo que ele mesmo anexa e recusa esses arquivos
+- Medidor de uso das contas free: conta o trabalho invisível do Claude (comandos executados, tempo trabalhando e o ZIP anexado) e aprende a capacidade bem mais rápido quando o limite acaba
+
+#id 2026-10-27-g
+#titulo Script continua de onde parou
+- Ao trocar de conta, o Script não repete mais a tarefa do zero: se o ZIP já tinha sido entregue, segue para a próxima
+- A conta nova recebe um PROGRESSO-DO-SCRIPT.md com o que já está pronto e o que falta, mais o trabalho parcial cortado pelo limite
+- Relatório redesenhado: cartão de estado, uma ficha por tarefa com seus ZIPs e a linha do tempo em frases
+- Barra de baixo: toque no + e escolha quais botões ficam ao lado dos favoritos (enviar main, ver script, relatório, baixar APK…)
+- Segure um botão da barra para tirá-lo
+
+#id 2026-10-27-f
+#titulo Script não cancela mais o envio
+- O fechador automático de avisos não clica mais em "Cancelar" nem aperta Escape nas janelas do Claude
+- Corrige o envio do anexo + mensagem que sumia em menos de 1 segundo
+
+#id 2026-10-27-e
+#titulo Anexo do Script mais confiável
+- A conferência do anexo olha só ao redor do próprio arquivo (antes podia ficar presa)
+- O status mostra o que está esperando e o relatório registra por qual caminho o anexo entrou
+
+#id 2026-10-27-d
+#titulo Corrige o erro do build sozinho
+- Se o build no GitHub falhar, o app pega o erro do log, copia e manda no chat do Claude como arquivo .txt
+- O Claude corrige, o app baixa o ZIP corrigido e entrega ao GitHub de novo, sozinho
+- Repete até o build passar (máximo de 6 tentativas seguidas) e avisa quando passou
+- Dá para desligar em Ajustes → Corrigir erro do build sozinho
+
+#id 2026-10-27-c
+#titulo Script mais paciente com anexos
+- O Script espera o chat novo carregar de verdade antes de anexar
+- Confere cada anexo na caixa (e se terminou de subir) e só então escreve e envia a tarefa
+- Sem tempo máximo: segue no instante em que tudo está pronto; se um anexo demorar, ele tenta de novo sozinho
+- Fecha sozinho avisos que atrapalham: novidades/atualização do app e janelas do Claude (menos o aviso de limite, que o app precisa ler)
+- Se o limite aparecer enquanto prepara o envio, ele troca de conta em vez de ficar esperando
+- Vale também ao continuar em outra conta
+
+#id 2026-10-27-b
+#titulo Uso estimado para contas free
+- Contas free não têm barra de uso: o app agora estima o % de cada conta pelo que acontece nos chats
+- A estimativa aprende sozinha: cada vez que o Claude avisa que o limite acabou, o app calibra a capacidade da conta
+- Aparece com ~ na etiqueta da aba e em Uso das contas; contas com barra real continuam mostrando o valor exato
+- Toque no card da conta em Uso das contas para corrigir ("Está em 50%"), zerar ou esquecer a estimativa
+
+#id 2026-10-27-a
+#titulo Script de tarefas automático
+- Menu → Script de tarefas: monte a lista do que quer fazer e toque em Play
+- O app manda uma tarefa por vez no Claude, espera terminar e baixa cada ZIP sozinho
+- Se o limite acabar, ele leva tudo para outra conta e continua, mesmo com o app minimizado
+- Só para quando termina a lista; aí mostra todos os ZIPs com botão para enviar ao GitHub (juntos ou um por um)
+- Separe várias tarefas de uma vez com uma linha contendo só ---
+- Prompts grandes (mais de 8 mil caracteres) vão como arquivo .txt anexado, sem travar o chat
+- Uso das contas: cada aba com barra de 0 a 100% (sessão de 5 h e semana), lida da página de uso do Claude e atualizada sozinha; o % também aparece na etiqueta da aba
+- Relatório ao vivo: acompanhe cada tarefa, os arquivos de cada ZIP e a linha do tempo, atualizando sozinho
+
+#id 2026-10-26-a
+#titulo Foto da conta, abas separadas e limite corrigido
+- Foto da conta: segure a aba → Foto da conta e escolha uma imagem da galeria no lugar da letra
+- Abas separadas em Liberadas e Em recarga (as em recarga ficam em ordem de quem volta primeiro)
+- Corrigido: o limite não vai mais para o dia seguinte quando o horário do aviso já passou
+- Quando a recarga termina, o app avisa e recarrega a aba para sumir o aviso antigo
+- O horário de volta agora entende 17:00, 5pm, 17h30, "em 2 horas" e dia da semana
+
+#id 2026-10-25-e
+#titulo Colar texto grande
+- Menu → Colar texto grande: cole qualquer texto, o app vira um arquivo .txt e anexa no chat da aba
+- Dá para usar o texto direto da área de transferência, sem colar na caixa
+
+#id 2026-10-25-d
+#titulo Atualização automática do jogo
+- Quando o build termina, o app já baixa o APK e abre a instalação sozinho
+- No Android 12 ou mais novo, pode atualizar o jogo sem nenhum toque
+- Ajustes: interruptor "Instalar o jogo sozinho"
+- O app procura atualização dele mesmo a cada 20 minutos
+
+#id 2026-10-25-c
+#titulo Continuar em outra conta
+- O app guarda a conversa do Claude em tempo real (a cada ~15s), uma por aba
+- Quando aparecer o aviso de limite, ele oferece continuar em outra conta
+- Menu → Continuar em outra conta (ou segure a aba): monta um ZIP com a conversa, o log de entregas e o código atual do projeto
+- Abre um chat novo na outra conta, já com a mensagem pronta e o ZIP anexado
+- Salva o chat completo: blocos abertos, imagens, links e uma cópia em HTML (tudo no botão Continuar em outra conta)
+- Anexa o ZIP direto na página da outra conta
+- Ajustes: interruptor "Salvar andamento do Claude"
+
+#id 2026-10-25-b
+#titulo Visual novo + tudo mais fácil
+- Interface redesenhada: abas com avatar colorido, endereço em pílula e dock de favoritos
+- Menu virou painel com atalhos grandes: enviar main, baixar APK, abrir jogo, projetos e ajustes
+- Projetos e ajustes em painéis com ícones; segundo plano agora é um interruptor
+- Novo: Baixar APK mais recente do projeto, com barra de progresso e botão de instalar
+- Popup do build com passos coloridos (✓ ✗ ⏳) e progresso do download
+- Avisos rápidos no rodapé em vez de balões
+
+#id 2026-10-25-a
+#titulo Build ao vivo + anexar melhorado
+- Ao baixar um ZIP do Claude, abre um popup mostrando o envio e os passos do build em tempo real
+- ZIPs baixados por link normal (não só blob) agora também vão pra _incoming/
+- Anexar: escolha entre Foto/vídeo (galeria) ou Arquivo (gerenciador, já na pasta Downloads)
+
+#id 2026-10-24-e
+#titulo Main do repo pro Claude
+- Menu: Enviar main pro Claude — baixa o ZIP do branch do projeto e anexa no chat aberto
+- Galeria do sistema para fotos/vídeos (não o gerenciador de arquivos)
+
+#id 2026-10-24-d
+#titulo Galeria e APK do projeto
+- Anexar foto/vídeo no Claude abre a galeria do sistema (não o gerenciador de arquivos)
+- Menu: Baixar APK mais recente do projeto atual
+
+#id 2026-10-24-c
+#titulo Projetos pelo GitHub
+- Ao adicionar projeto, escolhe o repositório na lista da sua conta
+- Branch, package e pasta _incoming são preenchidos sozinhos
+
+#id 2026-10-24-b
+#titulo Atualizar e abrir o jogo
+- Depois do build OK, o app baixa o APK da release e avisa para instalar
+- Atalho no menu: Abrir jogo (usa o package cadastrado no projeto)
+- No projeto você informa o package (applicationId) do jogo
+
+#id 2026-10-24-a
+#titulo Claude em segundo plano + entrega automática
+- Ao minimizar, o Claude continua rodando (notificação "Multi Abas ativo")
+- Projeto atual global: escolha o repositório de destino no menu
+- Ao baixar um ZIP do Claude, o app sobe sozinho em _incoming/ do projeto
+- Acompanha o Actions e avisa se o build deu certo ou falhou
+- Token do GitHub em Configurações (uma vez só)
+
+#id 2026-10-12-f
+#titulo Links do GitHub pelo Chrome
+- Tocar num link do GitHub dentro do Claude abre pelo Chrome, com o seu login
+
+#id 2026-10-12-e
+#titulo Nome do arquivo nos downloads
+- Arquivos baixados agora mantêm o nome original
+
+#id 2026-10-12-d
+#titulo Downloads corrigidos
+- Arquivos gerados pelo Claude (como ZIP) agora são salvos em Downloads
+
+#id 2026-10-12-c
+#titulo GitHub com o login certo
+- Cada favorito escolhe como abrir: conta da aba, sessão compartilhada ou Chrome
+- Pelo Chrome usa o mesmo login do seu Chrome (marcado com ↗)
+
+#id 2026-10-12-b
+#titulo Limite das contas
+- Segure uma aba e escolha "Definir volta do limite"
+- Um cronômetro mostra quanto falta, embaixo do nome da aba
+- Quando passar da hora aparece "Liberado" em verde
+
+#id 2026-10-12-a
+#titulo Barra de favoritos
+- Barra embaixo com links favoritos que você nomeia
+- Tocar abre o link por cima, na conta da aba atual, e fecha ao sair
+- Segure um favorito para editar ou remover
+
+#id 2026-10-11-a
+#titulo Primeira versão
+- Várias abas, cada uma com login e cookies separados
+- Escolha de arquivos do celular dentro dos sites
+- Atualização pelo próprio app

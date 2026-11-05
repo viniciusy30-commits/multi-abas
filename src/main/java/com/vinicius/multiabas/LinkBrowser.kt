@@ -100,10 +100,33 @@ class LinkBrowser(private val act: MainActivity) {
         LinkStore.cur = LinkStore.cur.coerceIn(0, maxOf(0, tabs.size - 1))
         buildBubble()
         buildPanel()
+        // abas que sobreviveram à tela anterior passam a falar com esta tela
+        for (w in webs.values) bindClients(w)
         refreshBubble()
     }
 
     // ───────────────────────── regras de quais links vêm para cá ─────────────────────────
+
+    private val internalHosts = listOf("claude.ai", "claude.com")
+
+    private fun reg(h: String): String {
+        val p = h.split('.')
+        return if (p.size <= 2) h else p.takeLast(2).joinToString(".")
+    }
+
+    /** Link tocado numa aba do app: deve abrir na bolinha? Login (Google, Apple, GitHub...) e o próprio Claude ficam onde estão. */
+    fun wants(fromUrl: String?, to: Uri): Boolean {
+        if (!prefs.getBoolean("capture", true)) return false
+        val host = to.host?.lowercase() ?: return false
+        if (internalHosts.any { host == it || host.endsWith(".$it") }) return false
+        val path = (to.path ?: "").lowercase()
+        if (listOf("login.", "accounts.", "auth.", "sso.", "signin.", "id.").any { host.startsWith(it) }) return false
+        if (listOf("/login", "/oauth", "/authorize", "/signin", "/session", "/sso", "/apps/", "/settings/connections").any { path.startsWith(it) || path.contains(it + "/") }) return false
+        if (host == "appleid.apple.com" || host == "login.microsoftonline.com" || host == "login.live.com") return false
+        val from = Uri.parse(fromUrl ?: "").host?.lowercase() ?: ""
+        if (from.isNotEmpty() && reg(from) == reg(host)) return false
+        return true
+    }
 
     // ───────────────────────── interface pública ─────────────────────────
 
@@ -257,14 +280,24 @@ class LinkBrowser(private val act: MainActivity) {
         s.mediaPlaybackRequiresUserGesture = false
         s.userAgentString = s.userAgentString.replace("; wv", "").replace(Regex("Version/\\d+\\.\\d+ "), "")
         CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
+        bindClients(w)
+        if (load) {
+            if (t.url.isBlank()) w.loadData(START_HTML, "text/html", "utf-8") else w.loadUrl(t.url)
+        }
+        return w
+    }
+
+    /** Liga os clients (links, título, progresso, janelas, download) a ESTA instância da tela.
+     *  Roda de novo para as WebViews antigas quando o app reabre, senão elas continuariam falando com a tela morta. */
+    private fun bindClients(w: WebView) {
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val sc = r.url.scheme ?: ""
                 if (sc == "http" || sc == "https" || sc == "about" || sc == "data" || sc == "blob") return false
                 try {
-                    val it = if (sc == "intent") Intent.parseUri(r.url.toString(), Intent.URI_INTENT_SCHEME) else Intent(Intent.ACTION_VIEW, r.url)
-                    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    act.startActivity(it)
+                    val ev = if (sc == "intent") Intent.parseUri(r.url.toString(), Intent.URI_INTENT_SCHEME) else Intent(Intent.ACTION_VIEW, r.url)
+                    ev.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    act.startActivity(ev)
                 } catch (_: Exception) { }
                 return true
             }
@@ -327,10 +360,6 @@ class LinkBrowser(private val act: MainActivity) {
                 Toast.makeText(act, "Não consegui baixar: " + (e.message ?: ""), Toast.LENGTH_LONG).show()
             }
         }
-        if (load) {
-            if (t.url.isBlank()) w.loadData(START_HTML, "text/html", "utf-8") else w.loadUrl(t.url)
-        }
-        return w
     }
 
     private fun hideCustom() {
@@ -593,6 +622,7 @@ class LinkBrowser(private val act: MainActivity) {
         pm.menu.add(0, 2, 1, "Copiar link")
         pm.menu.add(0, 3, 2, "Fechar esta aba")
         pm.menu.add(0, 4, 3, "Fechar todas as abas")
+        pm.menu.add(0, 5, 4, if (prefs.getBoolean("capture", true)) "Links do app abrem aqui: LIGADO" else "Links do app abrem aqui: DESLIGADO")
         pm.setOnMenuItemClickListener { m ->
             val t = currentTab()
             when (m.itemId) {
@@ -605,6 +635,11 @@ class LinkBrowser(private val act: MainActivity) {
                 }
                 3 -> closeTab(LinkStore.cur)
                 4 -> closeAll()
+                5 -> {
+                    val on = !prefs.getBoolean("capture", true)
+                    prefs.edit().putBoolean("capture", on).apply()
+                    Toast.makeText(act, if (on) "Links do app vão abrir na bolinha" else "Links do app abrem na própria aba", Toast.LENGTH_SHORT).show()
+                }
             }
             true
         }
