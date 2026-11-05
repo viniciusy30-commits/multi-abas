@@ -151,7 +151,7 @@ class LinkBrowser(private val act: MainActivity) {
     /** A tela do app vai ser destruída: solta as WebViews (elas continuam vivas) e tira as views. */
     fun detach() {
         try { host.removeAllViews() } catch (_: Exception) { }
-        for (w in webs.values) (w.context as? MutableContextWrapper)?.baseContext = app
+        for (w in webs.values) (w.context as? MutableContextWrapper)?.setBaseContext(app)
         try { root.removeView(bubble); root.removeView(panel) } catch (_: Exception) { }
     }
 
@@ -171,7 +171,7 @@ class LinkBrowser(private val act: MainActivity) {
         val w = webFor(t)
         host.removeAllViews()
         (w.parent as? ViewGroup)?.removeView(w)
-        (w.context as? MutableContextWrapper)?.baseContext = act
+        (w.context as? MutableContextWrapper)?.setBaseContext(act)
         host.addView(w, FrameLayout.LayoutParams(-1, -1))
         progress.visibility = View.GONE
         updateUi()

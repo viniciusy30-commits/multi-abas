@@ -517,6 +517,7 @@ class MainActivity : AppCompatActivity() {
     /** Se o app fechou sozinho da última vez, mostra o erro para copiar ou salvar. */
     private fun showLastCrash() {
         val txt = CrashLog.pending(this) ?: return
+        CrashLog.clear(this) // mostra uma vez só, mesmo se o aviso for dispensado tocando fora
         MaterialAlertDialogBuilder(this)
             .setTitle("O app fechou da última vez")
             .setMessage(txt.take(2500))
