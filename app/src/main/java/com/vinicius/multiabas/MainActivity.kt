@@ -133,31 +133,37 @@ class MainActivity : AppCompatActivity() {
             val inf = ZipSplitter.info(this, u)
             if (inf.name.endsWith(".zip", true) && inf.size > ZipSplitter.THRESHOLD) {
                 val mb = inf.size / (1024 * 1024)
-                MaterialAlertDialogBuilder(this)
-                    .setTitle("Zip grande")
-                    .setMessage("${inf.name} tem $mb MB, acima de 30 MB. Dividir em partes menores? As partes são enviadas juntas.")
-                    .setPositiveButton("Dividir") { _, _ ->
-                        val wait = MaterialAlertDialogBuilder(this)
-                            .setTitle("Dividindo…")
-                            .setMessage("Aguarde, pode levar um tempinho.")
-                            .setCancelable(false)
-                            .show()
-                        Thread {
-                            val parts = ZipSplitter.split(this, u, inf.name)
-                            runOnUiThread {
-                                wait.dismiss()
-                                if (parts.isEmpty()) {
-                                    say("Não deu para dividir, enviando o zip inteiro", true)
-                                    result.add(u)
-                                } else {
-                                    say("Dividido em ${parts.size} partes")
-                                    result.addAll(parts)
-                                }
-                                step(i + 1)
+                fun doSplit(n: Int) {
+                    val wait = MaterialAlertDialogBuilder(this)
+                        .setTitle("Dividindo…")
+                        .setMessage("Aguarde, pode levar um tempinho.")
+                        .setCancelable(false)
+                        .show()
+                    Thread {
+                        val parts = ZipSplitter.split(this, u, inf.name, n)
+                        runOnUiThread {
+                            wait.dismiss()
+                            if (parts.isEmpty()) {
+                                say("Não deu para dividir, enviando o zip inteiro", true)
+                                result.add(u)
+                            } else {
+                                say("Dividido em ${parts.size} partes")
+                                result.addAll(parts)
                             }
-                        }.start()
+                            step(i + 1)
+                        }
+                    }.start()
+                }
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Zip grande ($mb MB)")
+                    .setItems(arrayOf("Dividir em 2 partes", "Dividir em 3 partes", "Dividir em partes de até 24 MB", "Enviar inteiro (pode falhar)")) { _, which ->
+                        when (which) {
+                            0 -> doSplit(2)
+                            1 -> doSplit(3)
+                            2 -> doSplit(0)
+                            else -> { result.add(u); step(i + 1) }
+                        }
                     }
-                    .setNegativeButton("Enviar assim mesmo") { _, _ -> result.add(u); step(i + 1) }
                     .setOnCancelListener { cb?.onReceiveValue(null) }
                     .show()
             } else {
@@ -2037,14 +2043,32 @@ return 'none';})();"""
     }
 
 
-    /** Anexa o pacote; se passar de 30 MB, divide sozinho em partes e anexa uma por uma (o Claude aceita até 20 arquivos por conversa). */
+    /** Anexa o pacote. Acima de 30 MB NÃO divide sozinho: pergunta se você quer 2 partes, 3 partes ou o zip inteiro. */
     private fun attachAll(to: Tab, f: java.io.File, uri: Uri, ui: HandoffUi, popup: BuildPopup, result: (Boolean) -> Unit) {
         if (f.length() <= ZipSplitter.THRESHOLD) { attachZip(to, f, uri, result); return }
         val mb = f.length() / (1024 * 1024)
-        ui.set("attach", "⏳", "ZIP com $mb MB (acima de 30 MB): dividindo em partes")
-        popup.status("Dividindo o ZIP em partes…")
+        ui.set("attach", "⏳", "ZIP com $mb MB (acima de 30 MB): escolha como anexar")
+        runOnUiThread {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Zip grande ($mb MB)")
+                .setMessage("O Claude costuma recusar arquivo acima de 30 MB. Como anexar?")
+                .setItems(arrayOf("Dividir em 2 partes", "Dividir em 3 partes", "Anexar inteiro (pode falhar)")) { _, which ->
+                    when (which) {
+                        0 -> attachSplit(to, f, uri, ui, popup, 2, result)
+                        1 -> attachSplit(to, f, uri, ui, popup, 3, result)
+                        else -> attachZip(to, f, uri, result)
+                    }
+                }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    private fun attachSplit(to: Tab, f: java.io.File, uri: Uri, ui: HandoffUi, popup: BuildPopup, n: Int, result: (Boolean) -> Unit) {
+        ui.set("attach", "⏳", "Dividindo o ZIP em $n partes")
+        popup.status("Dividindo o ZIP em $n partes…")
         Thread {
-            val parts = ZipSplitter.split(this, Uri.fromFile(f), f.name).mapNotNull { it.path?.let { p -> java.io.File(p) } }
+            val parts = ZipSplitter.split(this, Uri.fromFile(f), f.name, n).mapNotNull { it.path?.let { p -> java.io.File(p) } }
             // guarda as partes também em Downloads, para anexar à mão se algo falhar
             for (pf in parts) { try { saveFileToDownloads(pf, pf.name) } catch (_: Exception) { } }
             runOnUiThread {
@@ -2053,22 +2077,18 @@ return 'none';})();"""
                     attachZip(to, f, uri, result)
                     return@runOnUiThread
                 }
-                val max = 20
-                val use = parts.take(max)
-                val skipped = parts.size - use.size
                 fun next(i: Int) {
-                    if (i >= use.size) {
-                        if (skipped > 0) ui.set("attach", "✓", "${use.size} partes anexadas; mais $skipped parte(s) ficaram em Downloads (limite de $max arquivos por conversa)")
-                        else ui.set("attach", "✓", "ZIP dividido e anexado em ${use.size} partes")
+                    if (i >= parts.size) {
+                        ui.set("attach", "✓", "ZIP dividido e anexado em ${parts.size} partes")
                         result(true)
                         return
                     }
-                    ui.set("attach", "⏳", "Anexando parte ${i + 1} de ${use.size}")
-                    popup.status("Anexando parte ${i + 1} de ${use.size}…")
-                    attachZip(to, use[i], Uri.fromFile(use[i])) { ok ->
+                    ui.set("attach", "⏳", "Anexando parte ${i + 1} de ${parts.size}")
+                    popup.status("Anexando parte ${i + 1} de ${parts.size}…")
+                    attachZip(to, parts[i], Uri.fromFile(parts[i])) { ok ->
                         if (ok) handler.postDelayed({ next(i + 1) }, 1200)
                         else {
-                            ui.set("attach", "✗", "Parte ${i + 1} de ${use.size} não anexou sozinha: anexe pelo + as partes que faltam (estão em Downloads)")
+                            ui.set("attach", "✗", "Parte ${i + 1} de ${parts.size} não anexou sozinha: anexe pelo + as partes que faltam (estão em Downloads)")
                             result(false)
                         }
                     }

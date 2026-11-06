@@ -29,7 +29,7 @@ object ZipSplitter {
     }
 
     /** Bloqueante: chame fora da thread principal. Devolve vazio se não for possível dividir. */
-    fun split(ctx: Context, uri: Uri, name: String): List<Uri> {
+    fun split(ctx: Context, uri: Uri, name: String, parts: Int = 0): List<Uri> {
         val outDir = File(ctx.cacheDir, "partes").apply { deleteRecursively(); mkdirs() }
         var tmp: File? = null
         try {
@@ -41,16 +41,35 @@ object ZipSplitter {
             }
             ZipFile(src).use { zf ->
                 val entries = zf.entries().toList().filter { !it.isDirectory }
-                val groups = ArrayList<MutableList<ZipEntry>>()
-                var cur = 0L
-                for (e in entries) {
+                val costs = entries.map { e ->
                     val cs = if (e.compressedSize >= 0) e.compressedSize else maxOf(e.size, 0L)
-                    val cost = cs + e.name.length * 2L + 120
-                    if (groups.isEmpty() || (cur + cost > TARGET && groups.last().isNotEmpty())) {
-                        groups.add(ArrayList()); cur = 0L
+                    cs + e.name.length * 2L + 120
+                }
+                fun groupBy(target: Long): ArrayList<MutableList<ZipEntry>> {
+                    val g = ArrayList<MutableList<ZipEntry>>()
+                    var cur = 0L
+                    entries.forEachIndexed { i, e ->
+                        val cost = costs[i]
+                        if (g.isEmpty() || (cur + cost > target && g.last().isNotEmpty())) {
+                            g.add(ArrayList()); cur = 0L
+                        }
+                        g.last().add(e)
+                        cur += cost
                     }
-                    groups.last().add(e)
-                    cur += cost
+                    return g
+                }
+                var groups = groupBy(TARGET)
+                if (parts >= 2) {
+                    // divide o tamanho total em "parts" pedaços do mesmo tamanho (aproximado); nunca mais que "parts"
+                    val total = costs.sum()
+                    var target = maxOf(total / parts + 1, costs.maxOrNull() ?: 1L)
+                    groups = groupBy(target)
+                    var tries = 0
+                    while (groups.size > parts && tries < 60) {
+                        target += maxOf(target / 25, 1L)
+                        groups = groupBy(target)
+                        tries++
+                    }
                 }
                 if (groups.size <= 1) return emptyList()
                 val base = name.removeSuffix(".zip").removeSuffix(".ZIP")
