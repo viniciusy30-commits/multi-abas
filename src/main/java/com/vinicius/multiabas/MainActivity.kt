@@ -135,7 +135,7 @@ class MainActivity : AppCompatActivity() {
                 val mb = inf.size / (1024 * 1024)
                 MaterialAlertDialogBuilder(this)
                     .setTitle("Zip grande")
-                    .setMessage("${inf.name} tem $mb MB, acima de 30 MB. Dividir em partes de até 25 MB? As partes são enviadas juntas.")
+                    .setMessage("${inf.name} tem $mb MB, acima de 30 MB. Dividir em partes menores? As partes são enviadas juntas.")
                     .setPositiveButton("Dividir") { _, _ ->
                         val wait = MaterialAlertDialogBuilder(this)
                             .setTitle("Dividindo…")
@@ -433,12 +433,6 @@ class MainActivity : AppCompatActivity() {
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val sc = r.url.scheme ?: ""
-                // link tocado de verdade pelo usuário → abre na bolinha (navegador flutuante)
-                if ((sc == "http" || sc == "https") && r.isForMainFrame && r.hasGesture() && !r.isRedirect &&
-                    linkBrowser.wants(v.url, r.url)) {
-                    linkBrowser.open(r.url.toString())
-                    return true
-                }
                 if (sc == "http" || sc == "https") return githubToChrome(v, r)
                 try { startActivity(Intent(Intent.ACTION_VIEW, r.url)) } catch (e: Exception) { }
                 return true
@@ -464,6 +458,7 @@ class MainActivity : AppCompatActivity() {
                 return openFileChooser(p)
             }
         }
+        w.setOnLongClickListener { linkLongPress(w) }
         setupDownload(w)
         container.addView(w)
         w.loadUrl(t.url)
@@ -522,6 +517,7 @@ class MainActivity : AppCompatActivity() {
     /** Se o app fechou sozinho da última vez, mostra o erro para copiar ou salvar. */
     private fun showLastCrash() {
         val txt = CrashLog.pending(this) ?: return
+        CrashLog.clear(this) // mostra uma vez só, mesmo se o aviso for dispensado tocando fora
         MaterialAlertDialogBuilder(this)
             .setTitle("O app fechou da última vez")
             .setMessage(txt.take(2500))
@@ -753,6 +749,40 @@ window.addEventListener('click',function(e){
  openPicker();
 },true);
 })();"""
+
+    /** Segurar o dedo num link: oferece abrir na bolinha (navegador flutuante). */
+    private fun linkLongPress(w: WebView): Boolean {
+        fun ok(u: String?) = !u.isNullOrBlank() && (u.startsWith("http://") || u.startsWith("https://"))
+        val r = w.hitTestResult
+        if (r.type == WebView.HitTestResult.SRC_ANCHOR_TYPE || r.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+            val u = r.extra
+            if (ok(u)) { showLinkMenu(u!!); return true }
+        }
+        // alguns links não aparecem no hitTest: pergunta ao WebView qual link está sob o dedo
+        val msg = android.os.Handler(android.os.Looper.getMainLooper()) { m ->
+            val u = m.data?.getString("url")
+            if (ok(u)) showLinkMenu(u!!)
+            true
+        }.obtainMessage()
+        w.requestFocusNodeHref(msg)
+        return false
+    }
+
+    private fun showLinkMenu(url: String) {
+        val shortU = url.removePrefix("https://").removePrefix("http://").removePrefix("www.")
+        Sheet(this).title("Link", if (shortU.length > 70) shortU.take(70) + "…" else shortU)
+            .row(R.drawable.ic_star, "Abrir na bolinha", "Navegador flutuante, em uma aba nova", highlighted = true) { linkBrowser.open(url) }
+            .row(R.drawable.ic_refresh, "Abrir nesta aba") { webs[tabs[cur].id]?.loadUrl(url) }
+            .row(R.drawable.ic_send, "Abrir no Chrome") {
+                try { androidx.browser.customtabs.CustomTabsIntent.Builder().build().launchUrl(this, Uri.parse(url)) } catch (_: Exception) { }
+            }
+            .row(R.drawable.ic_edit, "Copiar link") {
+                (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("link", url))
+                say("Link copiado")
+            }
+            .show()
+    }
 
     private fun githubToChrome(v: WebView, r: WebResourceRequest): Boolean {
         if (!r.isForMainFrame) return false
@@ -1820,7 +1850,7 @@ window.addEventListener('click',function(e){
                 } catch (e: Exception) { null }
                 var saved = false
                 if (f != null) {
-                    try { saveBytes(f.readBytes(), f.name, "application/zip"); saved = true } catch (_: Exception) { }
+                    try { saveFileToDownloads(f, f.name); saved = true } catch (_: Exception) { }
                 }
                 runOnUiThread {
                     if (f == null) {
@@ -2006,6 +2036,48 @@ return 'none';})();"""
         }
     }
 
+
+    /** Anexa o pacote; se passar de 30 MB, divide sozinho em partes e anexa uma por uma (o Claude aceita até 20 arquivos por conversa). */
+    private fun attachAll(to: Tab, f: java.io.File, uri: Uri, ui: HandoffUi, popup: BuildPopup, result: (Boolean) -> Unit) {
+        if (f.length() <= ZipSplitter.THRESHOLD) { attachZip(to, f, uri, result); return }
+        val mb = f.length() / (1024 * 1024)
+        ui.set("attach", "⏳", "ZIP com $mb MB (acima de 30 MB): dividindo em partes")
+        popup.status("Dividindo o ZIP em partes…")
+        Thread {
+            val parts = ZipSplitter.split(this, Uri.fromFile(f), f.name).mapNotNull { it.path?.let { p -> java.io.File(p) } }
+            // guarda as partes também em Downloads, para anexar à mão se algo falhar
+            for (pf in parts) { try { saveFileToDownloads(pf, pf.name) } catch (_: Exception) { } }
+            runOnUiThread {
+                if (parts.isEmpty()) {
+                    ui.set("attach", "⏳", "Não deu para dividir; tentando o ZIP inteiro")
+                    attachZip(to, f, uri, result)
+                    return@runOnUiThread
+                }
+                val max = 20
+                val use = parts.take(max)
+                val skipped = parts.size - use.size
+                fun next(i: Int) {
+                    if (i >= use.size) {
+                        if (skipped > 0) ui.set("attach", "✓", "${use.size} partes anexadas; mais $skipped parte(s) ficaram em Downloads (limite de $max arquivos por conversa)")
+                        else ui.set("attach", "✓", "ZIP dividido e anexado em ${use.size} partes")
+                        result(true)
+                        return
+                    }
+                    ui.set("attach", "⏳", "Anexando parte ${i + 1} de ${use.size}")
+                    popup.status("Anexando parte ${i + 1} de ${use.size}…")
+                    attachZip(to, use[i], Uri.fromFile(use[i])) { ok ->
+                        if (ok) handler.postDelayed({ next(i + 1) }, 1200)
+                        else {
+                            ui.set("attach", "✗", "Parte ${i + 1} de ${use.size} não anexou sozinha: anexe pelo + as partes que faltam (estão em Downloads)")
+                            result(false)
+                        }
+                    }
+                }
+                next(0)
+            }
+        }.start()
+    }
+
     /** Abre um chat novo na aba de destino, escreve a mensagem inicial e anexa o ZIP. */
     private fun openInTarget(to: Tab, f: java.io.File, ui: HandoffUi, popup: BuildPopup) {
         try {
@@ -2039,7 +2111,7 @@ return 'none';})();"""
                         popup.progress(80)
                         ui.set("attach", "⏳", "Anexando o ZIP")
                         popup.status("Anexando o ZIP…")
-                        attachZip(to, f, uri) { ok ->
+                        attachAll(to, f, uri, ui, popup) { ok ->
                             if (ok) {
                                 ui.set("attach", "✓", "ZIP anexado")
                                 popup.progress(100)
@@ -2452,7 +2524,7 @@ return 'none';})();"""
         try { linkBrowser.detach() } catch (_: Exception) { }
         if (isFinishing) BuildPopup.last = null
         // Se o usuário fechou de verdade (não só girou a tela), para o serviço
-        if (isFinishing && LinkStore.tabs.isEmpty()) KeepAliveService.stop(this)
+        if (isFinishing) KeepAliveService.stop(this)
         super.onDestroy()
     }
 
