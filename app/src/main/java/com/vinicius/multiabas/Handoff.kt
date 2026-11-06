@@ -518,7 +518,19 @@ return 'started';
                 if (diary.isNotBlank()) put(z, "diario-da-missao.txt", diary.takeLast(60_000))
             }
             if (project != null) {
-                val files = archiveDir(ctx, project.id).listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
+                var files = archiveDir(ctx, project.id).listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
+                // só o que o Claude entregou DEPOIS do último commit do main: o que veio antes já está em codigo/
+                val headTime = if (token.isNotBlank()) GitHubDelivery.headCommitTime(token, project, branch) else 0L
+                if (headTime > 0L) {
+                    val fmt = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+                    val (newer, older) = files.partition { f ->
+                        val m = Regex("^(\\d{8}-\\d{6})-").find(f.name)
+                        val t = try { if (m != null) fmt.parse(m.groupValues[1])?.time ?: Long.MAX_VALUE else Long.MAX_VALUE } catch (_: Exception) { Long.MAX_VALUE }
+                        t > headTime
+                    }
+                    older.forEach { skippedN++; skippedBytes += it.length() }
+                    files = newer
+                }
                 if (files.isNotEmpty()) {
                     onStatus("Juntando ${files.size} arquivo(s) entregue(s) pelo Claude…")
                     val seen = HashSet<String>()
@@ -576,7 +588,7 @@ return 'started';
                 if (!ov.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${ov.size} arquivo(s)).")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
                 else appendLine("- (o código não pôde ser baixado; peça ao usuário o ZIP do projeto se precisar dele)")
-                if (skippedN > 0) appendLine("- Nota: $skippedN arquivo(s) (${skippedBytes / 1048576} MB) NÃO foram incluídos por já estarem idênticos em `codigo/` ou repetidos; nada se perdeu.")
+                if (skippedN > 0) appendLine("- Nota: $skippedN arquivo(s) (${skippedBytes / 1048576} MB) NÃO foram incluídos por já estarem no main atual (`codigo/`) ou repetidos; nada se perdeu.")
                 appendLine()
                 if (project != null) {
                     appendLine("## Projeto")

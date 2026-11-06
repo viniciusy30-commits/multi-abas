@@ -274,6 +274,14 @@ object GitHubDelivery {
 
     private data class RunInfo(val status: String, val html: String?, val id: Long = 0L)
 
+    /** Hora (ms) do último commit do ramo, ou seja, do "main atual". 0 se não conseguir descobrir. */
+    fun headCommitTime(token: String, p: Project, branch: String): Long {
+        val ref = branch.ifBlank { "main" }
+        val j = apiGet(token, "/repos/${p.fullRepo()}/commits/$ref") ?: return 0L
+        val d = j.optJSONObject("commit")?.optJSONObject("committer")?.optString("date") ?: return 0L
+        return try { java.time.Instant.parse(d).toEpochMilli() } catch (_: Exception) { 0L }
+    }
+
     private fun resolveBranch(token: String, p: Project): String {
         if (p.branch.isNotBlank()) return p.branch
         val j = apiGet(token, "/repos/${p.fullRepo()}")

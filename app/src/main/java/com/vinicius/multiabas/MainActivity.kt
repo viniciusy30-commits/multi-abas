@@ -2050,8 +2050,7 @@ return 'none';})();"""
         ui.set("attach", "⏳", "ZIP com $mb MB (acima de 30 MB): escolha como anexar")
         runOnUiThread {
             MaterialAlertDialogBuilder(this)
-                .setTitle("Zip grande ($mb MB)")
-                .setMessage("O Claude costuma recusar arquivo acima de 30 MB. Como anexar?")
+                .setTitle("Zip grande ($mb MB): como anexar?")
                 .setItems(arrayOf("Dividir em 2 partes", "Dividir em 3 partes", "Anexar inteiro (pode falhar)")) { _, which ->
                     when (which) {
                         0 -> attachSplit(to, f, uri, ui, popup, 2, result)
