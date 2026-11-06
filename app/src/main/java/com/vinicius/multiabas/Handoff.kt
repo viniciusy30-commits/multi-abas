@@ -7,7 +7,10 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.CRC32
+import java.util.zip.CheckedInputStream
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
@@ -75,7 +78,10 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:!
         try {
             val clean = name.replace(Regex("[^\\w.\\-]+"), "_").trim('.').ifEmpty { "arquivo" }
             val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-            File(archiveDir(ctx, projectId), "$stamp-$clean").writeBytes(bytes)
+            val dirF = archiveDir(ctx, projectId)
+            val crc = CRC32().also { it.update(bytes) }.value
+            val dup = dirF.listFiles()?.any { it.isFile && it.length() == bytes.size.toLong() && fileCrc(it) == crc } == true
+            if (!dup) File(dirF, "$stamp-$clean").writeBytes(bytes)
         } catch (_: Exception) { }
     }
 
@@ -377,6 +383,52 @@ return 'started';
         z.closeEntry()
     }
 
+    /** Copia a entrada atual do zip de origem para o de destino e guarda o CRC do conteúdo (para achar duplicatas depois). */
+    private fun copyWithCrc(zi: java.io.InputStream, z: ZipOutputStream, name: String, crcs: HashMap<String, Long>) {
+        val cin = CheckedInputStream(zi, CRC32())
+        cin.copyTo(z)
+        crcs[name] = cin.checksum.value
+    }
+
+    private fun fileCrc(f: File): Long {
+        val c = CRC32()
+        val buf = ByteArray(64 * 1024)
+        f.inputStream().use { i -> while (true) { val n = i.read(buf); if (n < 0) break; c.update(buf, 0, n) } }
+        return c.value
+    }
+
+    /** O arquivo \"caminho\" com este CRC já está idêntico em codigo/? Testa o caminho inteiro e também sem as pastas do começo. */
+    private fun inCode(crcs: Map<String, Long>, path: String, crc: Long): Boolean {
+        var p = path.replace('\\', '/').trimStart('/')
+        while (true) {
+            if (crcs[p] == crc) return true
+            val i = p.indexOf('/')
+            if (i < 0) return false
+            p = p.substring(i + 1)
+        }
+    }
+
+    /**
+     * Um arquivo é redundante quando TODO o conteúdo dele já está idêntico em codigo/ (mesmo caminho e mesmo CRC).
+     * Num ZIP, todas as entradas têm que bater; se uma só for diferente ou nova, o ZIP inteiro é mantido.
+     */
+    private fun redundant(f: File, crcs: Map<String, Long>): Boolean {
+        if (crcs.isEmpty()) return false
+        return try {
+            if (f.name.endsWith(".zip", true)) {
+                ZipFile(f).use { zf ->
+                    var n = 0
+                    for (e in zf.entries()) {
+                        if (e.isDirectory) continue
+                        n++
+                        if (e.crc < 0 || !inCode(crcs, e.name, e.crc)) return false
+                    }
+                    n > 0
+                }
+            } else false
+        } catch (_: Exception) { false }
+    }
+
     /**
      * Monta o ZIP de continuação em cache/handoff_out. Devolve o arquivo ou null se não deu.
      * Roda fora da thread principal (baixa o código pelo GitHub).
@@ -401,6 +453,9 @@ return 'started';
         val branch = project?.branch?.ifBlank { "main" } ?: "main"
 
         var codeOk = false
+        val crcs = HashMap<String, Long>()
+        var skippedN = 0
+        var skippedBytes = 0L
         ZipOutputStream(out.outputStream().buffered()).use { z ->
             if (project != null && token.isNotBlank()) {
                 onStatus("Baixando o código atual de ${project.fullRepo()}…")
@@ -413,7 +468,7 @@ return 'started';
                             val n = e.name.substringAfter('/', "")
                             if (n.isNotEmpty() && !e.isDirectory && !skip(n) && ov?.containsKey(n) != true) {
                                 z.putNextEntry(ZipEntry("codigo/$n"))
-                                zi.copyTo(z)
+                                copyWithCrc(zi, z, n, crcs)
                                 z.closeEntry()
                             }
                             e = zi.nextEntry
@@ -434,7 +489,7 @@ return 'started';
                                 val n = e.name.removePrefix("codigo/")
                                 if (!e.isDirectory && e.name.startsWith("codigo/") && !skip(n) && ov?.containsKey(n) != true) {
                                     z.putNextEntry(ZipEntry(e.name))
-                                    zi.copyTo(z)
+                                    copyWithCrc(zi, z, n, crcs)
                                     z.closeEntry()
                                 }
                                 e = zi.nextEntry
@@ -450,6 +505,7 @@ return 'started';
                     z.putNextEntry(ZipEntry("codigo/$n"))
                     z.write(b)
                     z.closeEntry()
+                    crcs[n] = CRC32().also { it.update(b) }.value
                 }
             }
             if (Script.mission) {
@@ -465,7 +521,11 @@ return 'started';
                 val files = archiveDir(ctx, project.id).listFiles()?.filter { it.isFile }?.sortedBy { it.name } ?: emptyList()
                 if (files.isNotEmpty()) {
                     onStatus("Juntando ${files.size} arquivo(s) entregue(s) pelo Claude…")
+                    val seen = HashSet<String>()
                     files.forEach { f ->
+                        // o mesmo arquivo baixado duas vezes, ou um ZIP cujo conteúdo já está idêntico em codigo/, não precisa ir de novo
+                        val key = f.length().toString() + ":" + (try { fileCrc(f) } catch (_: Exception) { -1L })
+                        if (!seen.add(key) || redundant(f, crcs)) { skippedN++; skippedBytes += f.length(); return@forEach }
                         z.putNextEntry(ZipEntry("arquivos-do-claude/${f.name}"))
                         f.inputStream().use { it.copyTo(z) }
                         z.closeEntry()
@@ -480,6 +540,14 @@ return 'started';
             if (extraDir != null && extraDir.exists()) {
                 extraDir.walkTopDown().filter { it.isFile }.forEach { file ->
                     val rel = file.relativeTo(extraDir).path.replace('\\', '/')
+                    // arquivos que o Claude criou/baixou e que já estão idênticos em codigo/ (ou ZIPs que só repetem o código)
+                    if (rel.startsWith("arquivos-criados/") || rel.startsWith("arquivos-do-chat/") || rel.startsWith("arquivos/")) {
+                        val dup = try {
+                            if (file.name.endsWith(".zip", true)) redundant(file, crcs)
+                            else inCode(crcs, rel.substringAfter('/'), fileCrc(file))
+                        } catch (_: Exception) { false }
+                        if (dup) { skippedN++; skippedBytes += file.length(); return@forEach }
+                    }
                     z.putNextEntry(ZipEntry("chat-completo/$rel"))
                     file.inputStream().use { it.copyTo(z) }
                     z.closeEntry()
@@ -508,6 +576,7 @@ return 'started';
                 if (!ov.isNullOrEmpty()) appendLine("- `codigo/` já inclui, por cima do repositório, os arquivos dos ZIPs das tarefas anteriores do script (${ov.size} arquivo(s)).")
                 if (codeOk) appendLine("- `codigo/` — código atual do repositório (branch `$branch`), já com tudo que foi entregue e buildou.")
                 else appendLine("- (o código não pôde ser baixado; peça ao usuário o ZIP do projeto se precisar dele)")
+                if (skippedN > 0) appendLine("- Nota: $skippedN arquivo(s) (${skippedBytes / 1048576} MB) NÃO foram incluídos por já estarem idênticos em `codigo/` ou repetidos; nada se perdeu.")
                 appendLine()
                 if (project != null) {
                     appendLine("## Projeto")

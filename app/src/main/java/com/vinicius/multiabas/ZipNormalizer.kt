@@ -62,7 +62,8 @@ object ZipNormalizer {
                 val inside = names.map { it.substringAfter('/') }
                 val hasMarker = inside.any { it in MARKER_FILES || it.substringBefore('/') in MARKER_DIRS && it.contains('/') }
                 val looksWrapper = root.endsWith("-main") || root.endsWith("-master") || root.equals(repo, true)
-                if (hasMarker || looksWrapper) strip = "$root/"
+                // a pasta de topo "app", "src", "gradle"... já faz parte do caminho do repositório: nunca é embrulho
+                if (root !in MARKER_DIRS && (hasMarker || looksWrapper)) strip = "$root/"
             }
 
             val notes = ArrayList<String>()

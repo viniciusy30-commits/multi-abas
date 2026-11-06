@@ -11,7 +11,7 @@ import java.util.zip.ZipOutputStream
 /** Divide um zip grande em vários zips menores (cada parte é um zip válido, com arquivos inteiros). */
 object ZipSplitter {
     const val THRESHOLD = 30L * 1024 * 1024
-    const val TARGET = 25L * 1024 * 1024
+    const val TARGET = 24L * 1024 * 1024
 
     data class Info(val name: String, val size: Long)
 
@@ -59,6 +59,7 @@ object ZipSplitter {
                 groups.forEachIndexed { idx, g ->
                     val out = File(outDir, "$base-parte${idx + 1}de${groups.size}.zip")
                     ZipOutputStream(out.outputStream().buffered()).use { zo ->
+                        zo.setLevel(1)
                         for (e in g) {
                             val ne = ZipEntry(e.name)
                             if (e.time > 0) ne.time = e.time
