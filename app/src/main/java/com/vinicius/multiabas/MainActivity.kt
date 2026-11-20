@@ -380,6 +380,7 @@ class MainActivity : AppCompatActivity() {
         Updater.autoCheck(this)
         Novidades.show(this, false)
         handler.postDelayed(handoffTick, 8000)
+        handler.postDelayed(liveTick, 5000)
         if (prefs.getBoolean("keepalive", true)) {
             maybeRequestNotifPermission()
             KeepAliveService.start(this)
@@ -1428,6 +1429,27 @@ window.addEventListener('click',function(e){
     }
 
     // ───────────── Continuar em outra conta ─────────────
+
+    /** A cada 10s lê o que o Claude está escrevendo e guarda no aparelho (vai no pacote da outra conta). */
+    private val liveTick = object : Runnable {
+        override fun run() {
+            try { captureLive() } catch (_: Exception) { }
+            handler.postDelayed(this, 10000)
+        }
+    }
+
+    private fun captureLive() {
+        if (!prefs.getBoolean("handoff_auto", true)) return
+        val now = System.currentTimeMillis()
+        for (t in tabs.toList()) {
+            if (t.parked) continue
+            val w = webs[t.id] ?: continue
+            val u = w.url ?: continue
+            if (!u.contains("claude.ai/chat")) continue
+            if (now < t.holdUntil) continue
+            w.evaluateJavascript(Handoff.LIVE_JS) { raw -> Handoff.saveLive(this, t.id, raw) }
+        }
+    }
 
     private val handoffTick = object : Runnable {
         override fun run() {
@@ -2540,6 +2562,7 @@ return 'none';})();"""
 
     override fun onDestroy() {
         handler.removeCallbacks(handoffTick)
+        handler.removeCallbacks(liveTick)
         try { linkBrowser.detach() } catch (_: Exception) { }
         if (isFinishing) BuildPopup.last = null
         // Se o usuário fechou de verdade (não só girou a tela), para o serviço

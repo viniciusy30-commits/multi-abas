@@ -1,3 +1,12 @@
+#id 2026-11-20-a
+#titulo Continuar em outra conta: pega tudo e termina o pedido
+- O pacote agora traz o PEDIDO-ATUAL.md, feito a partir do chat que você está usando: seu último pedido completo, o que já foi entregue e a lista do que o Claude escreveu mas ainda NÃO está no código (arquivo novo ou diferente)
+- Chega de plano do projeto errado: PLANO-VIVO.md e outros PLANO-*.md soltos no repositório vão para planos-antigos-do-repositorio/ e o Claude é avisado para ignorá-los; a missão guardada só entra se for deste projeto, deste chat e ainda estiver rodando
+- A conversa usada é a mais completa entre a salva a cada 15s e a lida por inteiro na hora da troca
+- A mensagem inicial manda o Claude dizer em 6 linhas o que está pronto e o que falta, e já terminar tudo na mesma resposta, entregando em ZIP
+- NOVO: a cada 10 segundos o app lê o que o Claude está escrevendo (texto e cada bloco de código) e guarda no aparelho. Se o limite cortar no meio, o que já foi escrito vai no pacote (trabalho-ao-vivo.txt e trabalho-ao-vivo-codigo/) e a outra conta termina a partir dali, sem refazer do zero
+- A janela de entrega mostra qual plano foi usado (missão ativa, missão antiga ignorada ou pedido do chat)
+
 #id 2026-11-02-a
 #titulo Baixar main, anexos e zips grandes
 - O botão "Enviar main" agora se chama "Baixar main": baixa o main do projeto, confere se o ZIP está inteiro e salva em Downloads para você anexar pelo +

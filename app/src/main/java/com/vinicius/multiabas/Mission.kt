@@ -63,15 +63,19 @@ object Mission {
     // ───────────── começo / plano ─────────────
 
     /** Nova missão: guarda o pedido original e zera o resto. */
-    fun startRun(ctx: Context, text: String) {
+    fun startRun(ctx: Context, text: String, projectId: String = Projects.currentId(ctx)) {
         try {
             dir(ctx).listFiles()?.forEach { it.delete() }
         } catch (_: Exception) { }
         writeAtomic(f(ctx, "PLANO-ORIGINAL.md"),
             "# Pedido original (plano principal)\n\nIniciado em ${now()}\n\n" +
                 "O objetivo abaixo não muda durante a missão.\n\n---\n\n" + text.trim() + "\n")
+        writeAtomic(f(ctx, "PROJETO.txt"), projectId)
         journal(ctx, "Missão iniciada")
     }
+
+    /** Projeto (id) para o qual esta missão foi criada; vazio em missões antigas. */
+    fun projectId(ctx: Context): String = readSafe(f(ctx, "PROJETO.txt")).trim()
 
     fun original(ctx: Context): String = readSafe(f(ctx, "PLANO-ORIGINAL.md"))
 

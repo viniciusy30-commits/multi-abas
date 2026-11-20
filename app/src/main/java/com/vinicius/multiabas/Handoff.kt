@@ -128,6 +128,79 @@ return JSON.stringify({t:document.title,u:location.href,x:parts.join('\n\n'),l:!
         return try { JSONArray("[$raw]").getString(0) } catch (_: Exception) { null }
     }
 
+    /** Lê a ÚLTIMA resposta do Claude enquanto ela é escrita (texto + blocos de código), sem clicar em nada. */
+    const val LIVE_JS = """(function(){try{
+var all=document.querySelectorAll('[data-is-streaming]');
+if(!all.length)all=document.querySelectorAll('.font-claude-response,.font-claude-message');
+var m=all[all.length-1];if(!m)return '';
+var st=m.getAttribute('data-is-streaming')==='true';
+var code=[];
+m.querySelectorAll('pre').forEach(function(pr){var t=(pr.innerText||'').trim();if(t.length<20)return;
+var cd=pr.querySelector('code'),cl=((cd&&cd.className)||'')+' '+(pr.className||'');
+var lm=/language-([\w+#-]+)/.exec(cl);code.push({l:lm?lm[1].toLowerCase():'txt',t:t});});
+return JSON.stringify({u:location.href,s:st,x:(m.innerText||'').trim(),c:code});
+}catch(e){return '';}})();"""
+
+    private fun liveFile(ctx: Context, tabId: String) = File(dir(ctx), "live_$tabId.json")
+    private fun livePrevFile(ctx: Context, tabId: String) = File(dir(ctx), "live_${tabId}_prev.json")
+
+    /**
+     * Guarda (a cada ~10s) o que o Claude está escrevendo AGORA. Se a página perder o final quando o limite corta,
+     * o que já foi lido continua aqui. Na mesma resposta só troca por um texto MAIOR; quando começa outra resposta,
+     * a anterior vai para o arquivo "_prev" (assim a resposta cortada não some se você mandar "continua").
+     */
+    fun saveLive(ctx: Context, tabId: String, raw: String?) {
+        try {
+            val s = unquote(raw) ?: return
+            if (s.isBlank()) return
+            val o = JSONObject(s)
+            val url = o.optString("u")
+            val text = o.optString("x")
+            if (!url.contains("/chat/") || text.length < 40) return
+            val head = text.take(150)
+            val f = liveFile(ctx, tabId)
+            if (f.exists()) {
+                val old = try { JSONObject(f.readText()) } catch (_: Exception) { null }
+                if (old != null) {
+                    val oh = old.optString("h")
+                    val n = minOf(head.length, oh.length)
+                    val same = n >= 40 && head.take(n) == oh.take(n) && old.optString("u") == url
+                    if (same) {
+                        if (text.length <= old.optString("x").length) return
+                    } else if (old.optString("x").length > 200) {
+                        try { f.copyTo(livePrevFile(ctx, tabId), true) } catch (_: Exception) { }
+                    }
+                }
+            }
+            f.writeText(
+                JSONObject().put("u", url).put("h", head).put("t", now()).put("s", o.optBoolean("s"))
+                    .put("x", text.take(400_000)).put("c", o.optJSONArray("c") ?: JSONArray()).toString()
+            )
+        } catch (_: Exception) { }
+    }
+
+    private fun readLive(f: File): JSONObject? =
+        try { if (f.exists()) JSONObject(f.readText()).takeIf { it.optString("x").length >= 40 } else null } catch (_: Exception) { null }
+
+    private val LANG_EXT = mapOf("kotlin" to "kt", "python" to "py", "javascript" to "js", "typescript" to "ts",
+        "bash" to "sh", "shell" to "sh", "yaml" to "yml", "markdown" to "md")
+
+    /** Escreve no ZIP a resposta capturada (texto + cada bloco de código em arquivo). Devolve quantos blocos de código. */
+    private fun putLive(z: ZipOutputStream, name: String, folder: String, o: JSONObject, note: String): Int {
+        val sb = StringBuilder()
+        sb.append(note).append("\nCapturada em ").append(o.optString("t")).append(" · ")
+            .append(if (o.optBoolean("s")) "ainda estava ESCREVENDO na última leitura (pode ter sido cortada pelo limite)" else "já tinha terminado de escrever na última leitura")
+            .append("\nLink: ").append(o.optString("u")).append("\n\n").append(o.optString("x"))
+        put(z, name, sb.toString())
+        val c = o.optJSONArray("c") ?: return 0
+        for (i in 0 until c.length()) {
+            val b = c.optJSONObject(i) ?: continue
+            val l = b.optString("l", "txt")
+            put(z, "$folder/bloco_" + String.format(Locale.US, "%03d", i + 1) + "." + (LANG_EXT[l] ?: l), b.optString("t"))
+        }
+        return c.length()
+    }
+
     /** Abre os blocos recolhidos ("executou N comandos") da ÚLTIMA resposta do Claude. Devolve quantos abriu. */
     const val EXPAND_JS = """(function(){var all=document.querySelectorAll('[data-is-streaming]');
 if(!all.length)all=document.querySelectorAll('.font-claude-response,.font-claude-message');
@@ -357,15 +430,21 @@ return 'started';
 })('__TOKEN__');"""
 
     const val STARTER = "Estou continuando um projeto que começou em outra conta do Claude " +
-        "(o limite de lá acabou). Anexei um ZIP: leia primeiro o LEIA-ME-PRIMEIRO.md, depois a " +
-        "conversa-anterior.txt; o código atual está na pasta codigo/. Entenda onde paramos e " +
-        "continue exatamente de onde parou, sem refazer o que já está pronto. Eu só uso o celular: " +
-        "entregue as mudanças como ZIP pronto para baixar (os arquivos alterados/novos na estrutura " +
-        "do projeto), nunca código para copiar e colar. Se houver um trabalho-incompleto.txt, ele mostra " +
-        "o que o Claude anterior estava fazendo quando o limite acabou: termine a partir dali. A pasta " +
-        "chat-completo/ tem a conversa inteira com todos os blocos abertos, as imagens, os blocos de código e os links; " +
-        "arquivos-do-claude/ tem cópia de tudo (ZIPs, imagens, arquivos) que o Claude anterior entregou; " +
-        "dentro de chat-completo/, arquivos-criados/ e arquivos-do-chat/ têm os arquivos que ele fez mas não chegou a mandar em ZIP: use-os como base e entregue tudo junto em ZIP."
+        "(o limite de lá acabou). Anexei um ZIP. Leia NESTA ORDEM: 1) LEIA-ME-PRIMEIRO.md; " +
+        "2) PEDIDO-ATUAL.md, que é o plano DESTE chat: meu último pedido completo, o que já foi entregue e o que " +
+        "foi escrito mas ainda NÃO está no código; 3) trabalho-incompleto.txt, se existir (o que o Claude anterior " +
+        "estava fazendo quando o limite acabou); 3b) trabalho-ao-vivo.txt e trabalho-ao-vivo-codigo/, se existirem (o que o app leu enquanto o Claude escrevia, a cada ~10 s: se a resposta cortada estiver mais completa ali, use ali); 4) o final de conversa-anterior.txt. O código atual está na pasta codigo/. " +
+        "ATENÇÃO: arquivos PLANO-*.md ou CHECKPOINT.md que estiverem em planos-antigos-do-repositorio/ (ou soltos no " +
+        "repositório) podem ser de OUTRO projeto ou de uma fase antiga: NÃO são o pedido atual; ignore-os, a não ser que " +
+        "o PEDIDO-ATUAL.md ou eu os citemos. Seu trabalho é TERMINAR o pedido atual por inteiro, continuando exatamente de " +
+        "onde parou, sem refazer o que já está pronto. Comece com no máximo 6 linhas: (a) qual é o pedido, (b) o que já " +
+        "está pronto, (c) o que falta. Logo em seguida faça TUDO que falta, nesta mesma resposta, sem pedir permissão; só " +
+        "pergunte se algo realmente bloquear. Se o PEDIDO-ATUAL.md listar arquivos escritos e não aplicados, comece por eles " +
+        "e use-os como base. Eu só uso o celular: entregue as mudanças como ZIP pronto para baixar (os arquivos alterados/novos " +
+        "na estrutura do projeto), nunca código para copiar e colar. A pasta chat-completo/ tem a conversa inteira com todos os " +
+        "blocos abertos, as imagens, os blocos de código e os links; arquivos-do-claude/ tem cópia de tudo (ZIPs, imagens, " +
+        "arquivos) que o Claude anterior entregou; dentro de chat-completo/, arquivos-criados/ e arquivos-do-chat/ têm os arquivos " +
+        "que ele fez mas não chegou a mandar em ZIP: use-os como base e entregue tudo junto em ZIP."
 
     private fun slug(s: String): String =
         java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
@@ -429,6 +508,136 @@ return 'started';
         } catch (_: Exception) { false }
     }
 
+    /** Plano antigo solto na raiz do repositório (PLANO-VIVO.md, PLANO-...md, CHECKPOINT.md): pode ser de outro projeto. */
+    private fun isOldPlan(n: String): Boolean =
+        !n.contains('/') && Regex("(?i)^(PLANO|PLAN|CHECKPOINT)[^/]*\\.md$").matches(n)
+
+    /** A missão guardada no aparelho é DESTA conversa e deste projeto, e ainda está em andamento? */
+    private fun missionActive(ctx: Context, fromTabId: String, project: Project?): Boolean {
+        if (!Script.mission) return false
+        if (Script.status != Script.RUNNING && Script.status != Script.PAUSED) return false
+        if (Script.chatTabId.isNotBlank() && Script.chatTabId != fromTabId) return false
+        val mp = Mission.projectId(ctx)
+        if (project != null && mp.isNotBlank() && mp != project.id) return false
+        return true
+    }
+
+    /** "igual" = idêntico em codigo/; "diferente" = mesmo caminho com outro conteúdo; "novo" = não existe em codigo/. */
+    private fun codeState(crcs: Map<String, Long>, path: String, crc: Long): String {
+        if (inCode(crcs, path, crc)) return "igual"
+        var p = path.replace('\\', '/').trimStart('/')
+        while (true) {
+            if (crcs.containsKey(p)) return "diferente"
+            val i = p.indexOf('/')
+            if (i < 0) return "novo"
+            p = p.substring(i + 1)
+        }
+    }
+
+    /** Entradas de um ZIP que ainda NÃO estão idênticas em codigo/ (com o estado de cada uma). */
+    private fun zipPending(f: File, crcs: Map<String, Long>): List<String> {
+        val out = ArrayList<String>()
+        try {
+            ZipFile(f).use { zf ->
+                for (e in zf.entries()) {
+                    if (e.isDirectory || e.crc < 0) continue
+                    val st = codeState(crcs, e.name, e.crc)
+                    if (st != "igual") out.add("${e.name} ($st)")
+                }
+            }
+        } catch (_: Exception) { }
+        return out
+    }
+
+    private class Msg(val user: Boolean, val text: String)
+
+    private fun parseMsgs(t: String): List<Msg> {
+        val re = Regex("(?m)^### (VOCÊ|CLAUDE)\\r?\\n")
+        val ms = re.findAll(t).toList()
+        val out = ArrayList<Msg>()
+        for ((i, m) in ms.withIndex()) {
+            val end = if (i + 1 < ms.size) ms[i + 1].range.first else t.length
+            out.add(Msg(m.groupValues[1] == "VOCÊ", t.substring(m.range.last + 1, end).trim()))
+        }
+        return out
+    }
+
+    /** Fica com a conversa mais completa: a lida por inteiro no momento da troca ou a salva a cada 15 s. */
+    private fun bestTranscript(snapshot: String, full: String): String {
+        if (full.isBlank()) return snapshot
+        if (snapshot.isBlank()) return full
+        val head = snapshot.substringBefore("\n\n", "")
+        val body = snapshot.substringAfter("\n\n", snapshot)
+        return if (full.length >= body.length) (if (head.isNotBlank()) head + "\n\n" else "") + full else snapshot
+    }
+
+    /**
+     * PEDIDO-ATUAL.md: o plano do chat que o usuário está usando AGORA. Vem do próprio chat (último pedido, entregas,
+     * o que foi escrito e não aplicado), nunca de um arquivo de plano que esteja parado no repositório.
+     */
+    private fun pedidoAtual(
+        project: Project?, branch: String, transcript: String, unfinished: String?,
+        log: String, pending: List<String>, mActive: Boolean, live: Boolean
+    ): String {
+        val msgs = parseMsgs(transcript)
+        val users = msgs.filter { it.user && it.text.isNotBlank() }
+        val last = users.lastOrNull()
+        val subst = users.lastOrNull { it.text.length >= 120 }
+        return buildString {
+            appendLine("# PEDIDO ATUAL — o plano deste chat")
+            appendLine()
+            appendLine("Gerado em ${now()} a partir do chat que o usuário estava usando agora" +
+                (if (project != null) " (projeto ${project.name}, repositório ${project.fullRepo()}, branch `$branch`)" else "") + ".")
+            appendLine("Esta é a fonte do que fazer. Planos soltos no repositório (PLANO-*.md, CHECKPOINT.md) NÃO valem, a não ser que este arquivo ou o usuário os cite.")
+            if (mActive) appendLine("Há também uma missão automática ATIVA deste projeto: PLANO-ORIGINAL.md e PLANO-VIVO.md (na raiz deste ZIP) valem junto com este arquivo.")
+            appendLine()
+            appendLine("## 1. Último pedido do usuário")
+            if (last == null) {
+                appendLine("(nenhuma mensagem do usuário foi capturada; leia conversa-anterior.txt e chat-completo/)")
+            } else {
+                appendLine("```")
+                appendLine(last.text.take(20_000))
+                appendLine("```")
+                if (subst != null && subst !== last) {
+                    appendLine()
+                    appendLine("A última mensagem foi curta (continuação). O último pedido de verdade foi este:")
+                    appendLine("```")
+                    appendLine(subst.text.take(20_000))
+                    appendLine("```")
+                }
+            }
+            appendLine()
+            appendLine("## 2. Pedidos anteriores neste chat (resumo)")
+            val prev = users.filter { it !== last && it !== subst }.takeLast(15)
+            if (prev.isEmpty()) appendLine("(nenhum)")
+            else prev.forEachIndexed { i, m -> appendLine("${i + 1}. " + m.text.replace(Regex("\\s+"), " ").take(300)) }
+            appendLine()
+            appendLine("## 3. Como o Claude anterior terminou")
+            val lastClaude = msgs.lastOrNull { !it.user && it.text.isNotBlank() }
+            if (lastClaude == null) appendLine("(sem resposta capturada)")
+            else { appendLine("```"); appendLine(lastClaude.text.takeLast(2500)); appendLine("```") }
+            if (!unfinished.isNullOrBlank()) appendLine("A resposta estava cortada pelo limite: o que ele estava fazendo está em `trabalho-incompleto.txt`.")
+            if (live) appendLine("O app foi lendo o que o Claude escrevia, a cada ~10 s: `trabalho-ao-vivo.txt` e os blocos de código em `trabalho-ao-vivo-codigo/` (e `trabalho-ao-vivo-anterior*` para a resposta de antes). Se a resposta cortada estiver mais completa ali do que na conversa, USE o que está ali e termine a partir dali.")
+            appendLine()
+            appendLine("## 4. Escrito mas AINDA NÃO aplicado no código (aplique/termine isto primeiro)")
+            if (pending.isEmpty()) appendLine("Nada encontrado: o que foi entregue já está idêntico em `codigo/`.")
+            else {
+                pending.take(120).forEach { appendLine("- $it") }
+                if (pending.size > 120) appendLine("- … e mais ${pending.size - 120}")
+                appendLine("(\"diferente\" = o arquivo existe em `codigo/` mas com outro conteúdo; \"novo\" = não existe em `codigo/`.)")
+            }
+            appendLine()
+            appendLine("## 5. Entregas já registradas")
+            val ll = log.lines().filter { it.isNotBlank() }.takeLast(15)
+            if (ll.isEmpty()) appendLine("(nenhuma)") else ll.forEach { appendLine("- $it") }
+            appendLine()
+            appendLine("## 6. O que fazer agora")
+            appendLine("1. Em até 6 linhas: qual é o pedido, o que já está pronto, o que falta.")
+            appendLine("2. Termine TUDO que falta do pedido (seção 1), começando pelo que está na seção 4. Não refaça o que já está em `codigo/`.")
+            appendLine("3. Entregue tudo junto em UM ZIP, com os arquivos alterados/novos na estrutura do projeto (o usuário só usa o celular).")
+        }
+    }
+
     /**
      * Monta o ZIP de continuação em cache/handoff_out. Devolve o arquivo ou null se não deu.
      * Roda fora da thread principal (baixa o código pelo GitHub).
@@ -440,7 +649,9 @@ return 'started';
         progress: String? = null,
         onStatus: (String) -> Unit
     ): File? {
-        val transcript = try { chatFile(ctx, fromTabId).readText() } catch (_: Exception) { "" }
+        val snapshot = try { chatFile(ctx, fromTabId).readText() } catch (_: Exception) { "" }
+        val fullText = try { File(extraDir, "conversa-completa.txt").let { if (it.exists()) it.readText() else "" } } catch (_: Exception) { "" }
+        val transcript = bestTranscript(snapshot, fullText)
         if (transcript.isBlank() && project == null && extraDir == null) return null
 
         val outDir = File(ctx.cacheDir, "handoff_out").apply { mkdirs() }
@@ -448,7 +659,11 @@ return 'started';
         val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())
         val out = File(outDir, "$prefix-${slug(project?.name ?: fromName)}-$stamp.zip")
 
-        val ov: Map<String, ByteArray>? = overlay ?: (if (Script.mission) Script.overlay(ctx) else null)
+        // o plano da missão só vale se ela é DESTE projeto, DESTE chat e ainda está andando (senão é resto de outro trabalho)
+        val mActive = missionActive(ctx, fromTabId, project)
+        val staleMission = Script.mission && !mActive
+        val ov: Map<String, ByteArray>? = overlay ?: (if (mActive) Script.overlay(ctx) else null)
+        onStatus(if (mActive) "Plano: missão ativa deste projeto" else if (staleMission) "Plano: missão antiga ignorada (usando o pedido deste chat)" else "Plano: pedido atual deste chat")
         val log = if (project != null) readLog(ctx, project.id) else ""
         val branch = project?.branch?.ifBlank { "main" } ?: "main"
 
@@ -456,6 +671,8 @@ return 'started';
         val crcs = HashMap<String, Long>()
         var skippedN = 0
         var skippedBytes = 0L
+        val movedPlans = ArrayList<String>()
+        val pending = ArrayList<String>()
         ZipOutputStream(out.outputStream().buffered()).use { z ->
             if (project != null && token.isNotBlank()) {
                 onStatus("Baixando o código atual de ${project.fullRepo()}…")
@@ -467,7 +684,9 @@ return 'started';
                         while (e != null) {
                             val n = e.name.substringAfter('/', "")
                             if (n.isNotEmpty() && !e.isDirectory && !skip(n) && ov?.containsKey(n) != true) {
-                                z.putNextEntry(ZipEntry("codigo/$n"))
+                                val old = isOldPlan(n)
+                                if (old) movedPlans.add(n)
+                                z.putNextEntry(ZipEntry((if (old) "planos-antigos-do-repositorio/" else "codigo/") + n))
                                 copyWithCrc(zi, z, n, crcs)
                                 z.closeEntry()
                             }
@@ -488,7 +707,9 @@ return 'started';
                             while (e != null) {
                                 val n = e.name.removePrefix("codigo/")
                                 if (!e.isDirectory && e.name.startsWith("codigo/") && !skip(n) && ov?.containsKey(n) != true) {
-                                    z.putNextEntry(ZipEntry(e.name))
+                                    val old = isOldPlan(n)
+                                    if (old) movedPlans.add(n)
+                                    z.putNextEntry(ZipEntry(if (old) "planos-antigos-do-repositorio/$n" else e.name))
                                     copyWithCrc(zi, z, n, crcs)
                                     z.closeEntry()
                                 }
@@ -508,7 +729,7 @@ return 'started';
                     crcs[n] = CRC32().also { it.update(b) }.value
                 }
             }
-            if (Script.mission) {
+            if (mActive) {
                 // o plano principal e o andamento, em arquivos de verdade (não dependem de ler o chat)
                 val orig = Mission.original(ctx)
                 val live = Mission.living(ctx)
@@ -538,6 +759,8 @@ return 'started';
                         // o mesmo arquivo baixado duas vezes, ou um ZIP cujo conteúdo já está idêntico em codigo/, não precisa ir de novo
                         val key = f.length().toString() + ":" + (try { fileCrc(f) } catch (_: Exception) { -1L })
                         if (!seen.add(key) || redundant(f, crcs)) { skippedN++; skippedBytes += f.length(); return@forEach }
+                        if (f.name.endsWith(".zip", true)) zipPending(f, crcs).forEach { pending.add("arquivos-do-claude/${f.name} → $it") }
+                        else pending.add("arquivos-do-claude/${f.name} (não está em codigo/)")
                         z.putNextEntry(ZipEntry("arquivos-do-claude/${f.name}"))
                         f.inputStream().use { it.copyTo(z) }
                         z.closeEntry()
@@ -559,6 +782,10 @@ return 'started';
                             else inCode(crcs, rel.substringAfter('/'), fileCrc(file))
                         } catch (_: Exception) { false }
                         if (dup) { skippedN++; skippedBytes += file.length(); return@forEach }
+                        try {
+                            if (file.name.endsWith(".zip", true)) zipPending(file, crcs).forEach { pending.add("chat-completo/$rel → $it") }
+                            else if (rel.startsWith("arquivos-criados/") || rel.startsWith("arquivos-do-chat/")) pending.add("chat-completo/$rel (" + codeState(crcs, rel.substringAfter('/'), fileCrc(file)) + ")")
+                        } catch (_: Exception) { }
                     }
                     z.putNextEntry(ZipEntry("chat-completo/$rel"))
                     file.inputStream().use { it.copyTo(z) }
@@ -566,6 +793,14 @@ return 'started';
                 }
             }
 
+            val liveNow = readLive(liveFile(ctx, fromTabId))
+            val livePrev = readLive(livePrevFile(ctx, fromTabId))
+            if (liveNow != null) {
+                onStatus("Juntando o que o Claude estava escrevendo…")
+                putLive(z, "trabalho-ao-vivo.txt", "trabalho-ao-vivo-codigo", liveNow, "Última resposta do Claude, lida a cada ~10 s enquanto ele escrevia.")
+            }
+            if (livePrev != null) putLive(z, "trabalho-ao-vivo-anterior.txt", "trabalho-ao-vivo-anterior-codigo", livePrev, "Resposta ANTERIOR à última (pode ser a que foi cortada pelo limite, se o usuário mandou \"continua\").")
+            put(z, "PEDIDO-ATUAL.md", pedidoAtual(project, branch, transcript, unfinished, log, pending, mActive, liveNow != null))
             val tail = transcript.takeLast(6000)
             val md = buildString {
                 appendLine("# Continuação de projeto — LEIA PRIMEIRO")
@@ -574,9 +809,13 @@ return 'started';
                 appendLine("Você (Claude) está assumindo o trabalho de onde a outra conta parou.")
                 appendLine()
                 appendLine("## O que tem neste ZIP")
+                appendLine("- `PEDIDO-ATUAL.md` — **leia logo depois deste arquivo**: o plano DESTE chat (último pedido completo, entregas, e o que foi escrito mas ainda NÃO está em `codigo/`).")
+                if (movedPlans.isNotEmpty()) appendLine("- `planos-antigos-do-repositorio/` — planos que estavam soltos na raiz do repositório (${movedPlans.joinToString(", ")}). Podem ser de OUTRO projeto ou de uma fase antiga: NÃO são o pedido atual; só use se o pedido atual os citar.")
+                if (staleMission) appendLine("- Nota: havia uma missão antiga guardada no aparelho; ela foi deixada de fora de propósito (já encerrada ou de outro projeto).")
                 appendLine("- `conversa-anterior.txt` — a conversa completa da conta anterior (use para entender pedidos, decisões e pendências).")
+                if (liveNow != null) appendLine("- `trabalho-ao-vivo.txt` + `trabalho-ao-vivo-codigo/` — o que o Claude anterior estava ESCREVENDO, lido pelo app a cada ~10 s (cada bloco de código em um arquivo)" + (if (livePrev != null) "; `trabalho-ao-vivo-anterior*` é a resposta de antes." else "."))
                 appendLine("- `entregas.txt` — ZIPs que já foram entregues ao GitHub e o resultado do build.")
-                if (Script.mission) {
+                if (mActive) {
                     appendLine("- `PLANO-ORIGINAL.md` — **o pedido original completo** (o plano principal). O objetivo não muda.")
                     appendLine("- `PLANO-VIVO.md` — o plano com passos [x] prontos e [ ] pendentes e o próximo passo exato (se ainda não existir, o Claude anterior não chegou a entregar o primeiro ZIP).")
                     appendLine("- `diario-da-missao.txt` — linha do tempo: contas usadas, limites, ZIPs aceitos e recusados.")
@@ -599,8 +838,9 @@ return 'started';
                     appendLine()
                 }
                 appendLine("## Como trabalhar")
-                if (Script.mission) appendLine("00. MISSÃO: leia PLANO-ORIGINAL.md e PLANO-VIVO.md antes de tudo; o que está [x] não se refaz; siga as REGRAS DA MISSÃO da mensagem do chat.")
+                if (mActive) appendLine("00. MISSÃO: leia PLANO-ORIGINAL.md e PLANO-VIVO.md antes de tudo; o que está [x] não se refaz; siga as REGRAS DA MISSÃO da mensagem do chat.")
                 if (!progress.isNullOrBlank()) appendLine("0. Tarefas marcadas ✓ em `PROGRESSO-DO-SCRIPT.md` já estão prontas e aplicadas em `codigo/`: NÃO refaça, NÃO reescreva.")
+                appendLine("0b. O objetivo é TERMINAR o pedido atual (`PEDIDO-ATUAL.md`, seção 1) por inteiro, nesta mesma resposta, sem pedir permissão; comece pelo que está na seção 4 (escrito e não aplicado).")
                 appendLine("1. Leia `conversa-anterior.txt`, principalmente o final: o último pedido pode estar incompleto.")
                 appendLine("2. Confira em `codigo/` o que já existe antes de mexer; não refaça o que está pronto.")
                 appendLine("3. O usuário só usa o celular: entregue tudo como ZIP pronto para baixar, nunca código para copiar e colar.")
