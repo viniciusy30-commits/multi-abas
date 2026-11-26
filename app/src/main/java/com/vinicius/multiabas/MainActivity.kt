@@ -488,10 +488,11 @@ class MainActivity : AppCompatActivity() {
                 val clean = name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim()
                 val fin = if (clean.isEmpty()) "claude_" + System.currentTimeMillis() + "." + ext
                     else if (!clean.contains('.')) clean + "." + ext else clean
-                saveBytes(bytes, fin, mime)
+                val folder = DownloadFolders.current(this@MainActivity)
+                saveBytes(bytes, fin, mime, folder)
                 Handoff.archive(this@MainActivity, Projects.current(this@MainActivity)?.id ?: "", fin, bytes)
                 runOnUiThread {
-                    say("Salvo em Downloads: $fin", true)
+                    say("Salvo em Downloads/" + DownloadFolders.label(folder, fin), true)
                     maybeDeliverZip(fin, bytes)
                 }
             } catch (e: Exception) {
@@ -535,7 +536,7 @@ class MainActivity : AppCompatActivity() {
                 CrashLog.clear(this)
             }
             .setNeutralButton("Salvar em Downloads") { _, _ ->
-                try { saveBytes(txt.toByteArray(), "erro-multi-abas.txt", "text/plain"); say("Salvo em Downloads: erro-multi-abas.txt") }
+                try { saveBytes(txt.toByteArray(), "erro-multi-abas.txt", "text/plain", ""); say("Salvo em Downloads: erro-multi-abas.txt") }
                 catch (_: Exception) { say("Não consegui salvar", true) }
                 CrashLog.clear(this)
             }
@@ -543,31 +544,34 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun saveBytes(b: ByteArray, name: String, mime: String) {
+    /** Salva em Downloads/<folder>. A pasta é criada sozinha; folder vazio = raiz de Downloads. */
+    private fun saveBytes(b: ByteArray, name: String, mime: String, folder: String = DownloadFolders.current(this)) {
         if (android.os.Build.VERSION.SDK_INT >= 29) {
             val v = android.content.ContentValues()
             v.put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
             v.put(android.provider.MediaStore.Downloads.MIME_TYPE, mime)
-            v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, DownloadFolders.relPath(folder))
             val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)!!
             contentResolver.openOutputStream(uri)!!.use { it.write(b) }
         } else {
-            java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)!!, name).writeBytes(b)
+            java.io.File(DownloadFolders.legacyDir(this, folder), name).writeBytes(b)
         }
     }
 
     private fun enqueueDownload(u: String, ua: String, cd: String?, mime: String?, w: WebView) {
         try {
             val name = URLUtil.guessFileName(u, cd, mime)
+            val folder = DownloadFolders.current(this)
+            val dest = DownloadFolders.destName(folder, name)
             val r = DownloadManager.Request(Uri.parse(u))
             r.setMimeType(mime); r.addRequestHeader("User-Agent", ua)
             val ck = if (profilesOk) WebViewCompat.getProfile(w).cookieManager.getCookie(u) else CookieManager.getInstance().getCookie(u)
             if (ck != null) r.addRequestHeader("Cookie", ck)
             r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            try { r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name) }
-            catch (e: Exception) { r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, name) }
+            try { r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, dest) }
+            catch (e: Exception) { r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, dest) }
             (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(r)
-            say("Baixando $name")
+            say("Baixando " + DownloadFolders.label(folder, name))
         } catch (e: Exception) { say("Não foi possível baixar") }
     }
 
@@ -594,7 +598,8 @@ class MainActivity : AppCompatActivity() {
                 val ck = try {
                     if (profilesOk) WebViewCompat.getProfile(w).cookieManager.getCookie(u) else CookieManager.getInstance().getCookie(u)
                 } catch (_: Exception) { null }
-                say("Baixando $zipName…")
+                val zipFolder = DownloadFolders.current(this)
+                say("Baixando " + DownloadFolders.label(zipFolder, zipName) + "…")
                 Thread {
                     try {
                         val c = java.net.URL(u).openConnection() as java.net.HttpURLConnection
@@ -604,10 +609,10 @@ class MainActivity : AppCompatActivity() {
                         if (ck != null) c.setRequestProperty("Cookie", ck)
                         if (c.responseCode !in 200..299) throw Exception("HTTP " + c.responseCode)
                         val bytes = c.inputStream.use { it.readBytes() }
-                        saveBytes(bytes, zipName, "application/zip")
+                        saveBytes(bytes, zipName, "application/zip", zipFolder)
                         Handoff.archive(this, Projects.current(this)?.id ?: "", zipName, bytes)
                         runOnUiThread {
-                            say("Salvo em Downloads: $zipName", true)
+                            say("Salvo em Downloads/" + DownloadFolders.label(zipFolder, zipName), true)
                             maybeDeliverZip(zipName, bytes)
                         }
                     } catch (e: Exception) {
@@ -1345,9 +1350,9 @@ window.addEventListener('click',function(e){
                 saveFileToDownloads(zipF, name)
                 runOnUiThread {
                     popup.progress(100)
-                    popup.status("Salvo em Downloads: $name ($mb MB, $nFiles arquivos). Agora anexe pelo + do Claude.")
+                    popup.status("Salvo em Downloads/" + DownloadFolders.label(DownloadFolders.folderName(p), name) + " ($mb MB, $nFiles arquivos). Agora anexe pelo + do Claude.")
                     popup.done(true, null, null)
-                    say("Main salvo em Downloads: $name")
+                    say("Main salvo em Downloads/" + DownloadFolders.label(DownloadFolders.folderName(p), name))
                 }
             } catch (e: Exception) {
                 runOnUiThread { popup.status("Erro: ${e.message}"); popup.done(false, null, null) }
@@ -1355,16 +1360,16 @@ window.addEventListener('click',function(e){
         }.start()
     }
 
-    private fun saveFileToDownloads(f: java.io.File, name: String) {
+    private fun saveFileToDownloads(f: java.io.File, name: String, folder: String = DownloadFolders.current(this)) {
         if (android.os.Build.VERSION.SDK_INT >= 29) {
             val v = android.content.ContentValues()
             v.put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
             v.put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/zip")
-            v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            v.put(android.provider.MediaStore.Downloads.RELATIVE_PATH, DownloadFolders.relPath(folder))
             val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)!!
             contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
         } else {
-            f.copyTo(java.io.File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)!!, name), overwrite = true)
+            f.copyTo(java.io.File(DownloadFolders.legacyDir(this, folder), name), overwrite = true)
         }
     }
 

@@ -314,15 +314,16 @@ class LinkBrowser(private val act: MainActivity) {
             }
             try {
                 val name = URLUtil.guessFileName(u, cd, mime)
+                val folder = DownloadFolders.current(act)
                 val req = DownloadManager.Request(Uri.parse(u)).apply {
                     addRequestHeader("Cookie", CookieManager.getInstance().getCookie(u) ?: "")
                     addRequestHeader("User-Agent", ua)
                     setMimeType(mime)
                     setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                    setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+                    setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, DownloadFolders.destName(folder, name))
                 }
                 (act.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
-                Toast.makeText(act, "Baixando $name", Toast.LENGTH_SHORT).show()
+                Toast.makeText(act, "Baixando " + DownloadFolders.label(folder, name), Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(act, "Não consegui baixar: " + (e.message ?: ""), Toast.LENGTH_LONG).show()
             }

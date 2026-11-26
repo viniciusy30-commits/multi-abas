@@ -1,3 +1,11 @@
+#id 2026-11-26-a
+#titulo Pasta por repositório e favoritos nos downloads
+- Tudo que você baixa agora vai para uma pasta própria do repositório do Projeto atual, criada sozinha: Downloads/nome-do-repositório/arquivo
+- Sem Projeto atual, o arquivo continua indo direto para Downloads
+- Ao anexar um arquivo, a lista mostra as pastas: toque numa pasta para entrar e em Voltar (ou no botão voltar do Android) para sair; a pasta do projeto atual aparece primeiro
+- NOVO: toque na estrela de um arquivo para favoritar; a pasta Favoritos reúne tudo que você favoritou, de qualquer repositório
+- Os arquivos que você marca continuam marcados enquanto você navega entre as pastas
+
 #id 2026-11-20-a
 #titulo Continuar em outra conta: pega tudo e termina o pedido
 - O pacote agora traz o PEDIDO-ATUAL.md, feito a partir do chat que você está usando: seu último pedido completo, o que já foi entregue e a lista do que o Claude escreveu mas ainda NÃO está no código (arquivo novo ou diferente)
